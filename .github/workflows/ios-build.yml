@@ -1,0 +1,53 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install Dependencies
+        run: npm install
+
+      - name: Run Expo Prebuild
+        run: npx expo prebuild --platform ios --clean
+
+      - name: Install CocoaPods
+        run: |
+          cd ios
+          pod install
+
+      - name: Build iOS Archive (Unsigned)
+        run: |
+          cd ios
+          xcodebuild -workspace lkhkknios.xcworkspace \
+                     -scheme lkhkknios \
+                     -configuration Release \
+                     -destination "generic/platform=iOS" \
+                     -archivePath $RUNNER_TEMP/lkhkknios.xcarchive \
+                     archive \
+                     CODE_SIGNING_ALLOWED=NO
+
+      - name: Prepare IPA for KSign
+        run: |
+          mkdir -p Payload
+          cp -r $RUNNER_TEMP/lkhkknios.xcarchive/Products/Applications/*.app Payload/
+          zip -r lkhkknios.ipa Payload
+          mkdir -p output_ipa
+          mv lkhkknios.ipa output_ipa/
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lkhkknios-ipa
+          path: output_ipa/lkhkknios.ipa
