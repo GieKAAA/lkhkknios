@@ -1,0 +1,65 @@
+name: iOS unsigned build
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Runs `npm install --legacy-peer-deps` - the postinstall hook this
+      # triggers (patch-package) re-applies patches/*.patch automatically,
+      # same as it does locally.
+      - name: Install JS dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Prebuild native iOS project
+        run: npx expo prebuild --platform ios --clean
+
+      - name: Install CocoaPods dependencies
+        run: cd ios && pod install
+
+      - name: Archive (unsigned)
+        run: |
+          cd ios
+          xcodebuild -workspace lkhkknios.xcworkspace \
+            -scheme lkhkknios \
+            -configuration Release \
+            -archivePath build/lkhkknios.xcarchive \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            archive
+
+      # `xcodebuild -exportArchive` requires a signing/provisioning setup
+      # we intentionally don't have (no paid Apple Developer account) -
+      # package the unsigned .app straight out of the archive into a
+      # plain .ipa (a .ipa is just a zip with a Payload/ folder at its
+      # root), same approach used for the manual local builds so far.
+      - name: Package unsigned .ipa
+        run: |
+          cd ios/build
+          mkdir -p Payload
+          cp -r lkhkknios.xcarchive/Products/Applications/lkhkknios.app Payload/
+          zip -r lkhkknios-unsigned.ipa Payload
+          ls -la
+
+      - name: Upload .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lkhkknios-unsigned-ipa
+          path: ios/build/lkhkknios-unsigned.ipa
+          retention-days: 14
