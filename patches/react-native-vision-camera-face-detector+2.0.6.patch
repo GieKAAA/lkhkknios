@@ -30,7 +30,7 @@ index 518612a..f59cb46 100644
  
    options.landmarkMode = (
 diff --git a/node_modules/react-native-vision-camera-face-detector/ios/HybridImageFaceDetector.swift b/node_modules/react-native-vision-camera-face-detector/ios/HybridImageFaceDetector.swift
-index 608050c..97227b1 100644
+index 608050c..eed1dd4 100644
 --- a/node_modules/react-native-vision-camera-face-detector/ios/HybridImageFaceDetector.swift
 +++ b/node_modules/react-native-vision-camera-face-detector/ios/HybridImageFaceDetector.swift
 @@ -8,14 +8,23 @@ class HybridImageFaceDetector: HybridImageFaceDetectorSpec {
@@ -96,7 +96,7 @@ index 608050c..97227b1 100644
  
      let config = FaceProcessConfig(
        width: width,
-@@ -43,6 +74,44 @@ class HybridImageFaceDetector: HybridImageFaceDetectorSpec {
+@@ -43,6 +74,52 @@ class HybridImageFaceDetector: HybridImageFaceDetectorSpec {
      )
  
      let faces = try faceDetector.results(in: mlImage)
@@ -123,15 +123,23 @@ index 608050c..97227b1 100644
 +      var colorSpaceStr = "nil"
 +      var bitsPerComponentStr = "nil"
 +      var alphaInfoStr = "nil"
++      var pixelDimsStr = "nil"
 +      if let cg = cg {
 +        if let name = cg.colorSpace?.name {
 +          colorSpaceStr = String(name)
 +        }
 +        bitsPerComponentStr = "\(cg.bitsPerComponent)"
 +        alphaInfoStr = "\(cg.alphaInfo.rawValue)"
++        // Ditambahkan bersamaan dengan fix format.scale=1 di
++        // normalizedUpright(): dimensi PIKSEL MENTAH cgImage, bukan
++        // turunan dari uiImage.size/scale seperti sebelumnya - supaya
++        // kalau masih 0 wajah setelah fix ini, kita langsung tahu apakah
++        // buffer yang benar-benar dikirim ke MLKit sudah 1080x1920
++        // seperti seharusnya, tanpa perlu tebakan lagi.
++        pixelDimsStr = "\(cg.width)x\(cg.height)"
 +      }
 +      let hasCgImage = cg != nil
-+      let debugMessage = "DEBUG 0 faces: size=\(uiImage.size) scale=\(uiImage.scale) orientation=\(uiImage.imageOrientation.rawValue) mlOrientation=\(mlImage.orientation.rawValue) cgImage=\(hasCgImage) colorSpace=\(colorSpaceStr) bitsPerComponent=\(bitsPerComponentStr) alphaInfo=\(alphaInfoStr) perfMode=\(mlOptionsDebug.performanceMode.rawValue) minFaceSize=\(mlOptionsDebug.minFaceSize) landmarkMode=\(mlOptionsDebug.landmarkMode.rawValue) classificationMode=\(mlOptionsDebug.classificationMode.rawValue)"
++      let debugMessage = "DEBUG 0 faces: size=\(uiImage.size) scale=\(uiImage.scale) pixelDims=\(pixelDimsStr) orientation=\(uiImage.imageOrientation.rawValue) mlOrientation=\(mlImage.orientation.rawValue) cgImage=\(hasCgImage) colorSpace=\(colorSpaceStr) bitsPerComponent=\(bitsPerComponentStr) alphaInfo=\(alphaInfoStr) perfMode=\(mlOptionsDebug.performanceMode.rawValue) minFaceSize=\(mlOptionsDebug.minFaceSize) landmarkMode=\(mlOptionsDebug.landmarkMode.rawValue) classificationMode=\(mlOptionsDebug.classificationMode.rawValue)"
 +      throw NSError(
 +        domain: "HybridImageFaceDetector",
 +        code: -10,
@@ -141,7 +149,7 @@ index 608050c..97227b1 100644
      return faces.map {
        HybridFace(
          face: $0,
-@@ -51,16 +120,45 @@ class HybridImageFaceDetector: HybridImageFaceDetectorSpec {
+@@ -51,16 +128,64 @@ class HybridImageFaceDetector: HybridImageFaceDetectorSpec {
      }
    }
  
@@ -161,7 +169,26 @@ index 608050c..97227b1 100644
 +    // formats instead of erroring, so always redraw here - even when
 +    // orientation is already .up - to guarantee VisionImage receives a
 +    // plain, freshly rendered opaque RGBA bitmap.
-+    let renderer = UIGraphicsImageRenderer(size: image.size)
++    //
++    // BUGFIX (patched via patch-package): every on-device diagnostic dump
++    // so far reported `size=(1080.0, 1920.0) scale=3.0` - by definition
++    // (UIImage.size == CGImage pixel dimensions / scale), that means the
++    // REAL underlying pixel buffer was 3240x5760 (~18.6MP), 9x the pixel
++    // count (3x per side) of the 1080x1920 FHD_16_9 photo the JS side
++    // deliberately requested (see targetResolution comment in
++    // LKHScreen.tsx - chosen because 1080x1920 was already "jauh lebih
++    // dari cukup"). `UIGraphicsImageRenderer(size:)` with no explicit
++    // format defaults its render scale to the DEVICE'S SCREEN scale
++    // (3.0 on this hardware) rather than the source image's own scale -
++    // so a redraw at declared size 1080x1920 silently bakes out a
++    // 3240x5760 pixel buffer. Forcing `format.scale = 1` makes the
++    // renderer's declared size and its real pixel buffer identical
++    // (1080x1920 pixels, matching the original capture intent exactly),
++    // removing the size/scale ambiguity entirely instead of just
++    // guessing that a ~18.6MP image was somehow the problem.
++    let format = UIGraphicsImageRendererFormat()
++    format.scale = 1
++    let renderer = UIGraphicsImageRenderer(size: image.size, format: format)
 +    return renderer.image { _ in
 +      image.draw(in: CGRect(origin: .zero, size: image.size))
 +    }
