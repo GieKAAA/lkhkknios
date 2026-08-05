@@ -1,0 +1,182 @@
+diff --git a/node_modules/react-native-vision-camera-face-detector/ios/HybridImageFaceDetector.swift b/node_modules/react-native-vision-camera-face-detector/ios/HybridImageFaceDetector.swift
+index 0000000..0000000 100644
+--- a/node_modules/react-native-vision-camera-face-detector/ios/HybridImageFaceDetector.swift
++++ b/node_modules/react-native-vision-camera-face-detector/ios/HybridImageFaceDetector.swift
+@@ -8,14 +8,23 @@
+   private let runClassifications: Bool
+   private let trackingEnabled: Bool
+   private let faceDetector: FaceDetector
++  // DIAGNOSTIK SEMENTARA: disimpan di sini (bukan dibaca balik dari
++  // `faceDetector` setelah dibuat) karena tidak ada cara memverifikasi dari
++  // Windows apakah MLKitFaceDetection.FaceDetector benar-benar mengekspos
++  // opsi yang dipakai sebagai properti publik - lebih aman simpan objek
++  // yang kita bangun sendiri. Hapus bersamaan dengan diagnostik di
++  // detectFaces() setelah root cause ketemu.
++  private let mlOptionsDebug: MLKitFaceDetection.FaceDetectorOptions
+ 
+   init(options: ImageFaceDetectorOptions) {
+     self.runLandmarks = options.runLandmarks ?? false
+     self.runContours = options.runContours ?? false
+     self.runClassifications = options.runClassifications ?? false
+     self.trackingEnabled = options.trackingEnabled ?? false
++    let mlOptions = options.toMLFaceDetectorOptions()
++    self.mlOptionsDebug = mlOptions
+     self.faceDetector = FaceDetector.faceDetector(
+-      options: options.toMLFaceDetectorOptions()
++      options: mlOptions
+     )
+ 
+     super.init()
+@@ -24,12 +33,34 @@
+   func detectFaces(
+     image: InputImage
+   ) throws -> [any HybridFaceSpec] {
+-    let uiImage = try createInputImage(
++    let loadedImage = try createInputImage(
+       uri: try resolveInputImage(image)
+     )
++    // BUGFIX (patched via patch-package): explicitly setting
++    // VisionImage.orientation to match the source UIImage's own
++    // imageOrientation (see git history of this line) did NOT fix
++    // detection, confirmed via an on-device diagnostic dump showing
++    // orientation=3 (.right) correctly forwarded as mlOrientation=3, yet
++    // still 0 faces on an unambiguously good, correctly-displayed photo -
++    // so MLKit's still-image pipeline doesn't reliably honor that
++    // property here regardless of it being set correctly. Instead of
++    // telling MLKit how to rotate the pixel buffer, physically bake the
++    // rotation into a freshly rendered bitmap before handing it over -
++    // UIGraphicsImageRenderer's `image { }` closure draws respecting the
++    // source's imageOrientation, and the resulting image always reports
++    // .imageOrientation == .up, removing any dependency on downstream
++    // orientation handling being correct at all.
++    let uiImage = normalizedUpright(loadedImage)
+     let mlImage = VisionImage(image: uiImage)
+-    let width = Double(uiImage.size.height)
+-    let height = Double(uiImage.size.width)
++    mlImage.orientation = uiImage.imageOrientation
++    // BUGFIX (patched via patch-package): UIImage.size is already
++    // orientation-aware (for a rotated image, .width/.height already
++    // reflect the *displayed* dimensions, matching what a viewer sees) -
++    // this swap was assigning the pre-rotation width to `width` and vice
++    // versa, corrupting FaceProcessConfig's coordinate math for every
++    // detected face's bounds/landmarks scaling.
++    let width = Double(uiImage.size.width)
++    let height = Double(uiImage.size.height)
+ 
+     let config = FaceProcessConfig(
+       width: width,
+@@ -43,6 +74,44 @@
+     )
+ 
+     let faces = try faceDetector.results(in: mlImage)
++    // DIAGNOSTIK SEMENTARA (patched via patch-package): sudah dua perbaikan
++    // (InputImage-casting, orientation) tidak mengubah hasil - masih nol
++    // wajah pada foto yang jelas-jelas bagus. Daripada menebak fix native
++    // lagi tanpa akses Xcode Console, lempar detail teknis lewat pesan
++    // error yang SUDAH terbukti sampai ke pengguna lewat Alert (lihat
++    // riwayat "[debug: file WxH]" di NoFaceDetectedError) - ini
++    // menunjukkan apakah cgImage valid, color space, dan performanceMode
++    // yang BENAR-BENAR dipakai MLKit (bukan asumsi dari sisi JS). Hapus
++    // setelah root cause ketemu.
++    if faces.isEmpty {
++      let cg = uiImage.cgImage
++      // Deliberately basic (plain `if let`, no `.map`/optional-chaining
++      // tricks, no single big `+`-chained expression): two earlier
++      // attempts at this diagnostic block failed to compile - first the
++      // Swift type checker gave up entirely on one big chained expression,
++      // then `cg?.bitsPerComponent.map { ... }` turned out to parse as
++      // "if cg exists, evaluate bitsPerComponent.map{...}" - and
++      // .bitsPerComponent/.alphaInfo.rawValue are non-optional properties,
++      // so .map isn't valid on them once "unwrapped" by that chain. Plain
++      // if-let sidesteps all of that ambiguity.
++      var colorSpaceStr = "nil"
++      var bitsPerComponentStr = "nil"
++      var alphaInfoStr = "nil"
++      if let cg = cg {
++        if let name = cg.colorSpace?.name {
++          colorSpaceStr = String(name)
++        }
++        bitsPerComponentStr = "\(cg.bitsPerComponent)"
++        alphaInfoStr = "\(cg.alphaInfo.rawValue)"
++      }
++      let hasCgImage = cg != nil
++      let debugMessage = "DEBUG 0 faces: size=\(uiImage.size) scale=\(uiImage.scale) orientation=\(uiImage.imageOrientation.rawValue) mlOrientation=\(mlImage.orientation.rawValue) cgImage=\(hasCgImage) colorSpace=\(colorSpaceStr) bitsPerComponent=\(bitsPerComponentStr) alphaInfo=\(alphaInfoStr) perfMode=\(mlOptionsDebug.performanceMode.rawValue) minFaceSize=\(mlOptionsDebug.minFaceSize) landmarkMode=\(mlOptionsDebug.landmarkMode.rawValue) classificationMode=\(mlOptionsDebug.classificationMode.rawValue)"
++      throw NSError(
++        domain: "HybridImageFaceDetector",
++        code: -10,
++        userInfo: [NSLocalizedDescriptionKey: debugMessage]
++      )
++    }
+     return faces.map {
+       HybridFace(
+         face: $0,
+@@ -51,16 +120,33 @@
+     }
+   }
+ 
++  private func normalizedUpright(_ image: UIImage) -> UIImage {
++    if image.imageOrientation == .up {
++      return image
++    }
++    let renderer = UIGraphicsImageRenderer(size: image.size)
++    return renderer.image { _ in
++      image.draw(in: CGRect(origin: .zero, size: image.size))
++    }
++  }
++
+   private func resolveInputImage(
+-    _ input: Any
++    _ input: InputImage
+   ) throws -> String {
+-    if let uri = input as? String {
++    // BUGFIX (patched via patch-package): `input` here is a Nitro-generated
++    // Swift enum (InputImage = .first(String) | .second(Double) |
++    // .third(ImageUri)), not a plain Any/String/Dictionary - casting it
++    // directly with `as? String` or `as? [String: Any]` never succeeds
++    // (an enum case doesn't bridge to its associated value that way), so
++    // this always fell through to "Invalid image type" regardless of what
++    // was actually passed from JS. Use the enum's own `asType(_:)` helper
++    // (generated alongside it) to unwrap it correctly instead.
++    if let uri = input.asType(String.self) {
+       return uri
+     }
+ 
+-    if let object = input as? [String: Any],
+-      let uri = object["uri"] as? String {
+-      return uri
++    if let imageUri = input.asType(ImageUri.self) {
++      return imageUri.uri
+     }
+ 
+     throw NSError(
+diff --git a/node_modules/react-native-vision-camera-face-detector/ios/Extensions/ML+FaceDetectorOptions.swift b/node_modules/react-native-vision-camera-face-detector/ios/Extensions/ML+FaceDetectorOptions.swift
+index 0000000..0000000 100644
+--- a/node_modules/react-native-vision-camera-face-detector/ios/Extensions/ML+FaceDetectorOptions.swift
++++ b/node_modules/react-native-vision-camera-face-detector/ios/Extensions/ML+FaceDetectorOptions.swift
+@@ -40,7 +40,7 @@
+ }
+ 
+ private func buildMLFaceDetectorOptions(
+-    performanceMode: Any?,
++    performanceMode: PerformanceMode?,
+     runLandmarks: Bool?,
+     runContours: Bool?,
+     runClassifications: Bool?,
+@@ -49,8 +49,16 @@
+ ) -> MLKitFaceDetection.FaceDetectorOptions {
+   let options = MLKitFaceDetection.FaceDetectorOptions()
+ 
++  // BUGFIX (patched via patch-package): PerformanceMode is a Nitro-generated
++  // type backed by a C++ enum (margelo.nitro.camera.facedetector.
++  // PerformanceMode), not a Swift String - `String(describing: performanceMode)`
++  // on that never produces the literal string "accurate" (it reflects the
++  // C++-bridged value's own description, not its JS string form), so this
++  // comparison always fell through to `.fast`, silently ignoring
++  // `performanceMode: "accurate"` requested from JS. Use the enum's own
++  // `.stringValue` (generated alongside it) instead of reflection.
+   options.performanceMode = (
+-    String(describing: performanceMode) == "accurate"
++    performanceMode?.stringValue == "accurate"
+   ) ? .accurate : .fast
+ 
+   options.landmarkMode = (
