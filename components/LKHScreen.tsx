@@ -979,7 +979,13 @@ export default function LKHScreen() {
           <View style={styles.cameraControls} pointerEvents="box-none">
             <TouchableOpacity
               style={styles.closeBtn}
-              onPress={() => setIsCameraVisible(false)}
+              onPress={() => {
+                // Bersihkan overlay foto debug juga - kalau tidak, foto lama
+                // ini akan nongol lagi menutupi kamera di sesi absen berikutnya
+                // (debugPhotoUri masih ke-set dari kegagalan sebelumnya).
+                setDebugPhotoUri(null);
+                setIsCameraVisible(false);
+              }}
             >
               <BlurView intensity={50} tint="dark" style={styles.closeBtnBlur}>
                 <Ionicons name="close" size={24} color="#FFF" />
@@ -1021,25 +1027,37 @@ export default function LKHScreen() {
               </Text>
             </View>
           )}
-        </SafeAreaView>
-      </Modal>
 
-      {/* DIAGNOSTIK SEMENTARA: lihat komentar di deklarasi debugPhotoUri. */}
-      <Modal visible={!!debugPhotoUri} animationType="slide">
-        <SafeAreaView style={{ flex: 1, backgroundColor: "#000" }}>
-          {debugPhotoUri && (
-            <Image
-              source={{ uri: debugPhotoUri }}
-              style={{ flex: 1 }}
-              resizeMode="contain"
-            />
+          {/* DIAGNOSTIK SEMENTARA: lihat komentar di deklarasi debugPhotoUri.
+              Dirender sebagai overlay di DALAM Modal kamera ini (bukan
+              <Modal> terpisah) - dua <Modal> RN yang sama-sama visible di
+              iOS tidak reliable (modal kedua bisa gagal tampil secara diam-
+              diam), dan modal kamera ini sengaja tetap terbuka saat deteksi
+              gagal supaya pengguna bisa langsung coba lagi. */}
+          {!!debugPhotoUri && (
+            <View
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                backgroundColor: "#000",
+              }}
+            >
+              <Image
+                source={{ uri: debugPhotoUri }}
+                style={{ flex: 1 }}
+                resizeMode="contain"
+              />
+              <TouchableOpacity
+                style={{ padding: 16, alignItems: "center" }}
+                onPress={() => setDebugPhotoUri(null)}
+              >
+                <Text style={{ color: "#FFF", fontSize: 16 }}>Tutup</Text>
+              </TouchableOpacity>
+            </View>
           )}
-          <TouchableOpacity
-            style={{ padding: 16, alignItems: "center" }}
-            onPress={() => setDebugPhotoUri(null)}
-          >
-            <Text style={{ color: "#FFF", fontSize: 16 }}>Tutup</Text>
-          </TouchableOpacity>
         </SafeAreaView>
       </Modal>
     </SafeAreaView>
