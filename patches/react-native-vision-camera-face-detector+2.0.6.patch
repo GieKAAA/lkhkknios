@@ -1,8 +1,39 @@
+diff --git a/node_modules/react-native-vision-camera-face-detector/ios/Extensions/ML+FaceDetectorOptions.swift b/node_modules/react-native-vision-camera-face-detector/ios/Extensions/ML+FaceDetectorOptions.swift
+index 518612a..f59cb46 100644
+--- a/node_modules/react-native-vision-camera-face-detector/ios/Extensions/ML+FaceDetectorOptions.swift
++++ b/node_modules/react-native-vision-camera-face-detector/ios/Extensions/ML+FaceDetectorOptions.swift
+@@ -40,7 +40,7 @@ extension FaceDetectorOutputOptions {
+ }
+ 
+ private func buildMLFaceDetectorOptions(
+-    performanceMode: Any?,
++    performanceMode: PerformanceMode?,
+     runLandmarks: Bool?,
+     runContours: Bool?,
+     runClassifications: Bool?,
+@@ -49,8 +49,16 @@ private func buildMLFaceDetectorOptions(
+ ) -> MLKitFaceDetection.FaceDetectorOptions {
+   let options = MLKitFaceDetection.FaceDetectorOptions()
+ 
++  // BUGFIX (patched via patch-package): PerformanceMode is a Nitro-generated
++  // type backed by a C++ enum (margelo.nitro.camera.facedetector.
++  // PerformanceMode), not a Swift String - `String(describing: performanceMode)`
++  // on that never produces the literal string "accurate" (it reflects the
++  // C++-bridged value's own description, not its JS string form), so this
++  // comparison always fell through to `.fast`, silently ignoring
++  // `performanceMode: "accurate"` requested from JS. Use the enum's own
++  // `.stringValue` (generated alongside it) instead of reflection.
+   options.performanceMode = (
+-    String(describing: performanceMode) == "accurate"
++    performanceMode?.stringValue == "accurate"
+   ) ? .accurate : .fast
+ 
+   options.landmarkMode = (
 diff --git a/node_modules/react-native-vision-camera-face-detector/ios/HybridImageFaceDetector.swift b/node_modules/react-native-vision-camera-face-detector/ios/HybridImageFaceDetector.swift
-index 0000000..0000000 100644
+index 608050c..97227b1 100644
 --- a/node_modules/react-native-vision-camera-face-detector/ios/HybridImageFaceDetector.swift
 +++ b/node_modules/react-native-vision-camera-face-detector/ios/HybridImageFaceDetector.swift
-@@ -8,14 +8,23 @@
+@@ -8,14 +8,23 @@ class HybridImageFaceDetector: HybridImageFaceDetectorSpec {
    private let runClassifications: Bool
    private let trackingEnabled: Bool
    private let faceDetector: FaceDetector
@@ -27,7 +58,7 @@ index 0000000..0000000 100644
      )
  
      super.init()
-@@ -24,12 +33,34 @@
+@@ -24,12 +33,34 @@ class HybridImageFaceDetector: HybridImageFaceDetectorSpec {
    func detectFaces(
      image: InputImage
    ) throws -> [any HybridFaceSpec] {
@@ -65,7 +96,7 @@ index 0000000..0000000 100644
  
      let config = FaceProcessConfig(
        width: width,
-@@ -43,6 +74,44 @@
+@@ -43,6 +74,44 @@ class HybridImageFaceDetector: HybridImageFaceDetectorSpec {
      )
  
      let faces = try faceDetector.results(in: mlImage)
@@ -110,14 +141,26 @@ index 0000000..0000000 100644
      return faces.map {
        HybridFace(
          face: $0,
-@@ -51,16 +120,33 @@
+@@ -51,16 +120,45 @@ class HybridImageFaceDetector: HybridImageFaceDetectorSpec {
      }
    }
  
 +  private func normalizedUpright(_ image: UIImage) -> UIImage {
-+    if image.imageOrientation == .up {
-+      return image
-+    }
++    // BUGFIX (patched via patch-package): used to short-circuit here when
++    // `image.imageOrientation == .up`, skipping the redraw below as an
++    // "unnecessary" optimization when no rotation was needed. But that
++    // early return also skipped the *pixel-format* normalization this
++    // redraw provides, not just orientation - an on-device diagnostic
++    // dump showed a plain opaque JPEG capture (orientation already .up)
++    // still reporting alphaInfo=2 (.premultipliedFirst), which is NOT the
++    // .noneSkipFirst format iOS's stock JPEG decoder normally produces
++    // for an opaque image - a sign the file went through some
++    // non-standard pixel pipeline upstream (VisionCamera's own capture
++    // pipeline) before reaching here. MLKit's iOS face detector is known
++    // to silently return zero results for CGImages in unusual pixel
++    // formats instead of erroring, so always redraw here - even when
++    // orientation is already .up - to guarantee VisionImage receives a
++    // plain, freshly rendered opaque RGBA bitmap.
 +    let renderer = UIGraphicsImageRenderer(size: image.size)
 +    return renderer.image { _ in
 +      image.draw(in: CGRect(origin: .zero, size: image.size))
@@ -149,34 +192,3 @@ index 0000000..0000000 100644
      }
  
      throw NSError(
-diff --git a/node_modules/react-native-vision-camera-face-detector/ios/Extensions/ML+FaceDetectorOptions.swift b/node_modules/react-native-vision-camera-face-detector/ios/Extensions/ML+FaceDetectorOptions.swift
-index 0000000..0000000 100644
---- a/node_modules/react-native-vision-camera-face-detector/ios/Extensions/ML+FaceDetectorOptions.swift
-+++ b/node_modules/react-native-vision-camera-face-detector/ios/Extensions/ML+FaceDetectorOptions.swift
-@@ -40,7 +40,7 @@
- }
- 
- private func buildMLFaceDetectorOptions(
--    performanceMode: Any?,
-+    performanceMode: PerformanceMode?,
-     runLandmarks: Bool?,
-     runContours: Bool?,
-     runClassifications: Bool?,
-@@ -49,8 +49,16 @@
- ) -> MLKitFaceDetection.FaceDetectorOptions {
-   let options = MLKitFaceDetection.FaceDetectorOptions()
- 
-+  // BUGFIX (patched via patch-package): PerformanceMode is a Nitro-generated
-+  // type backed by a C++ enum (margelo.nitro.camera.facedetector.
-+  // PerformanceMode), not a Swift String - `String(describing: performanceMode)`
-+  // on that never produces the literal string "accurate" (it reflects the
-+  // C++-bridged value's own description, not its JS string form), so this
-+  // comparison always fell through to `.fast`, silently ignoring
-+  // `performanceMode: "accurate"` requested from JS. Use the enum's own
-+  // `.stringValue` (generated alongside it) instead of reflection.
-   options.performanceMode = (
--    String(describing: performanceMode) == "accurate"
-+    performanceMode?.stringValue == "accurate"
-   ) ? .accurate : .fast
- 
-   options.landmarkMode = (
