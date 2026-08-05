@@ -153,6 +153,7 @@ export class NoFaceDetectedError extends Error {}
 export class MultipleFacesDetectedError extends Error {}
 export class PoorQualityFaceError extends Error {}
 export class FaceModelNotReadyError extends Error {}
+export class FaceEmbeddingInvalidError extends Error {}
 
 let legacyCleanupDone = false;
 async function cleanupLegacyKeysOnce(): Promise<void> {
@@ -481,7 +482,21 @@ export async function getFaceEmbedding(photoUri: string): Promise<Float32Array> 
   const model = await getModel();
   const outputs = await model.run([inputBuffer]);
   const raw = new Float32Array(outputs[0]);
-  return l2Normalize(raw);
+  const embedding = l2Normalize(raw);
+  // BUGFIX: a broken tensor pipeline upstream (see the platform_react_native
+  // registration fix elsewhere in this file) was able to run to completion
+  // without throwing while still producing an embedding full of NaN - this
+  // then got saved as the reference face via saveReferenceEmbedding(),
+  // silently poisoning every later faceSimilarity() comparison ("kemiripan
+  // NaN%") since a dot product involving NaN is always NaN. Fail loudly
+  // here instead, for both enroll and verify, so a broken embedding can
+  // never be saved or compared against in the first place.
+  if (embedding.some((value) => !Number.isFinite(value))) {
+    throw new FaceEmbeddingInvalidError(
+      "Gagal memproses foto wajah (data tidak valid). Coba ambil ulang foto.",
+    );
+  }
+  return embedding;
 }
 
 /**
