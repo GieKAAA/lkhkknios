@@ -195,7 +195,33 @@ function getImageSize(uri: string): Promise<{ width: number; height: number }> {
 }
 
 async function detectSingleFace(photoUri: string): Promise<Face> {
-  const faces = imageFaceDetector.detectFaces(photoUri);
+  let faces: Face[] | null;
+  try {
+    faces = imageFaceDetector.detectFaces(photoUri);
+  } catch (error) {
+    // BUGFIX: the native side (patched HybridImageFaceDetector.swift) now
+    // THROWS a raw NSError (domain HybridImageFaceDetector, code -10) when
+    // MLKit finds zero faces, instead of returning an empty array - it was
+    // added as a temporary diagnostic to surface MLKit's internal state
+    // (image size/scale/orientation/color space) without Xcode Console
+    // access. Left uncaught, this raw native error bypassed the "0 faces"
+    // handling below entirely (fell into LKHScreen's generic Error branch),
+    // which meant the user never got the debug photo modal (setDebugPhotoUri)
+    // built for exactly this case - only a wall of Swift diagnostic text.
+    // Route it back through the same NoFaceDetectedError path, folding the
+    // native diagnostic string into the message instead of discarding it.
+    const nativeMessage = error instanceof Error ? error.message : String(error);
+    let sizeInfo = "";
+    try {
+      const { width, height } = await getImageSize(photoUri);
+      sizeInfo = ` [debug: file ${width}x${height}]`;
+    } catch {
+      sizeInfo = " [debug: gagal baca dimensi file]";
+    }
+    throw new NoFaceDetectedError(
+      `Wajah tidak terdeteksi. Pastikan wajah terlihat jelas dan pencahayaan cukup.${sizeInfo} [native: ${nativeMessage}]`,
+    );
+  }
 
   if (!faces || faces.length === 0) {
     let sizeInfo = "";
