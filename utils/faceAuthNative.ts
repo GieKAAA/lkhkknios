@@ -9,6 +9,18 @@ import * as tf from "@tensorflow/tfjs";
 // so importing it directly avoids dragging that unused, now-missing
 // dependency into the bundle.
 import { decodeJpeg } from "@tensorflow/tfjs-react-native/dist/decode_image";
+// BUGFIX: dist/index.js's SIDE EFFECT of `import './platform_react_native'`
+// is what actually registers tfjs-core's React Native platform
+// (`tf.setPlatform('react-native', new PlatformReactNative())`) - skipping
+// the root barrel above to dodge expo-camera also skipped this
+// registration, so `tf.ready()` resolved with no RN platform set, and any
+// tensor op that internally reads `env().platform` (e.g. inside
+// decodeJpeg/toFloat/reshape) crashed with "Cannot read property
+// 'isTypedArray' of undefined". platform_react_native.js itself only
+// imports tfjs-core/tfjs-backend-cpu/tfjs-backend-webgl/expo-gl/react-native
+// - none of which are the expo-camera dependency being avoided - so
+// importing it directly for its side effect is safe.
+import "@tensorflow/tfjs-react-native/dist/platform_react_native";
 import * as FileSystem from "expo-file-system/legacy";
 import * as ImageManipulator from "expo-image-manipulator";
 import { toByteArray } from "base64-js";
