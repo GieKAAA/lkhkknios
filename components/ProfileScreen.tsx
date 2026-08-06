@@ -14,7 +14,7 @@ import {
     View,
 } from "react-native";
 import {
-    clearAllFaceData,
+    getCalibrationLog,
     getRemainingFaceResets,
     MAX_FACE_RESETS,
     resetReferenceFace,
@@ -149,6 +149,32 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
     }
   };
 
+  const handleViewCalibrationLog = async () => {
+    const log = await getCalibrationLog();
+    if (log.length === 0) {
+      Alert.alert(
+        "Log Kemiripan Kosong",
+        "Belum ada data kemiripan wajah yang tercatat dari absensi.",
+      );
+      return;
+    }
+    // 10 terbaru dulu (paling relevan buat lihat kejadian baru-baru ini) -
+    // log bisa sampai 200 entri, ditampilkan semua lewat Alert bakal
+    // kepotong/susah dibaca.
+    const recent = log.slice(-10).reverse();
+    const lines = recent.map((entry) => {
+      const time = new Date(entry.t).toLocaleTimeString("id-ID", {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+      return `${time}  ${(entry.s * 100).toFixed(1)}%  (${entry.label})`;
+    });
+    Alert.alert(
+      `Log Kemiripan Wajah (${log.length} total, 10 terbaru)`,
+      lines.join("\n"),
+    );
+  };
+
   const handleResetReferenceFace = () => {
     if (remainingResets <= 0) {
       Alert.alert(
@@ -268,7 +294,14 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
                   await AsyncStorage.removeItem("@user_token");
                   await AsyncStorage.removeItem("@user_nim");
                   await AsyncStorage.removeItem("@user_profile");
-                  await clearAllFaceData();
+                  // BUGFIX: used to also call clearAllFaceData() here,
+                  // wiping the reference face on every logout - this app is
+                  // used on the student's own personal device (see
+                  // PANDUAN-BUILD-IPA.md / KSign sideload flow), not shared
+                  // between accounts, so there was no real "account switch"
+                  // this was protecting against - it just forced a
+                  // re-enroll on every login, which is worse for
+                  // anti-titip-absen than keeping the original reference.
                   onLogout();
                 },
               },
@@ -313,6 +346,20 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
               ? "Mode Demo Aktif - Ketuk untuk Matikan"
               : "Mode Demo (Uji Fitur Tanpa Periode KKN)"}
           </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.demoButton}
+          onPress={handleViewCalibrationLog}
+          activeOpacity={0.85}
+        >
+          <Ionicons
+            name="stats-chart-outline"
+            size={18}
+            color={TEXT_SECONDARY}
+            style={{ marginRight: 8 }}
+          />
+          <Text style={styles.demoButtonText}>Lihat Log Kemiripan Wajah</Text>
         </TouchableOpacity>
       </ScrollView>
     </SafeAreaView>
