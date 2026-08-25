@@ -18,17 +18,19 @@ import {
 import { CommonResolutions, useCameraDevice, useCameraPermission, usePhotoOutput } from "react-native-vision-camera";
 import { Camera as FaceDetectorCamera } from "react-native-vision-camera-face-detector";
 import {
-    faceSimilarity,
     FACE_DETECTOR_OPTIONS,
     FACE_MATCH_THRESHOLD,
     getFaceEmbedding,
-    getReferenceEmbedding,
     logSimilaritySample,
     MultipleFacesDetectedError,
     NoFaceDetectedError,
     PoorQualityFaceError,
-    saveReferenceEmbedding,
 } from "../utils/faceAuthNative";
+import {
+    bestSimilarityToEnrollment,
+    isEnrolled,
+} from "../utils/faceEnrollment";
+import FaceEnrollmentModal from "./FaceEnrollmentModal";
 import { useFaceQualityGate } from "../hooks/useFaceQualityGate";
 import { scheduleDailyAttendanceReminders } from "../utils/notifications";
 import {
@@ -144,6 +146,10 @@ export default function LKHScreen() {
   });
   const faceQualityGate = useFaceQualityGate();
   const [isCameraVisible, setIsCameraVisible] = useState(false);
+  // Enrollment terpisah (FaceEnrollmentModal) - terbuka saat user mencoba
+  // absen tanpa punya set wajah terdaftar. Menggantikan jalur lama di mana
+  // foto absen pertama diam-diam menjadi wajah patokan.
+  const [isEnrollmentVisible, setIsEnrollmentVisible] = useState(false);
   // Koordinat device saat lolos cek geofence terakhir kali kamera dibuka -
   // dipakai ulang saat foto benar-benar disimpan (persistAttendance) supaya
   // tidak perlu minta GPS dua kali dalam rentang beberapa detik yang sama.
@@ -156,7 +162,7 @@ export default function LKHScreen() {
   // benar-benar diambil (lihat takeSelfie) - bukan terus-menerus selama
   // kamera terbuka, karena menjalankan model AI berulang kali sambil live
   // preview kamera aktif terbukti bikin aplikasi force close di beberapa HP.
-  const [hasReferenceFace, setHasReferenceFace] = useState(false);
+  const [hasEnrollment, setHasEnrollment] = useState(false);
   const [isProcessingFace, setIsProcessingFace] = useState(false);
   // DIAGNOSTIK SEMENTARA: menampilkan foto hasil jepretan apa adanya saat
   // deteksi wajah gagal, supaya bisa dilihat langsung (miring/gelap/
@@ -172,9 +178,7 @@ export default function LKHScreen() {
     loadUserProfile().then(() => {
       fetchServerLKH();
     });
-    getReferenceEmbedding().then((embedding) => {
-      setHasReferenceFace(!!embedding);
-    });
+    isEnrolled().then(setHasEnrollment);
     isDemoModeActive().then(setDemoModeActive);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -407,6 +411,16 @@ export default function LKHScreen() {
       return;
     }
 
+    // Enrollment terpisah: tanpa set wajah terdaftar, pintu masuknya adalah
+    // modal pendaftaran (3-5 foto), BUKAN kamera absen - dan semua pemeriksaan
+    // berat di bawah (izin kamera, geofence) tidak perlu dijalankan dulu.
+    // Menggantikan jalur lama yang diam-diam menjadikan foto absen pertama
+    // sebagai wajah patokan.
+    if (!(await isEnrolled())) {
+      setIsEnrollmentVisible(true);
+      return;
+    }
+
     if (!hasPermission) {
       const granted = await requestPermission();
       if (!granted) {
@@ -530,28 +544,25 @@ export default function LKHScreen() {
         return;
       }
 
-      const referenceEmbedding = await getReferenceEmbedding();
+      // Verifikasi max-of-N: bandingkan ke SEMUA embedding terdaftar dan
+      // ambil similarity tertinggi (lihat bestSimilarityToEnrollment).
+      const bestSimilarity = await bestSimilarityToEnrollment(embedding);
 
-      if (!referenceEmbedding) {
-        // Absen pertama kali: foto ini dijadikan patokan wajah.
-        await saveReferenceEmbedding(embedding, photoUri);
-        setHasReferenceFace(true);
-        await persistAttendance(photoUri);
+      if (bestSimilarity === null) {
+        // Set wajah hilang di tengah jalan (misal di-reset dari halaman
+        // Profil) - jalur enroll-diam-diam sudah dihapus, jadi arahkan ke
+        // modal pendaftaran resmi alih-alih menjadikan foto ini patokan.
         setIsCameraVisible(false);
-        Alert.alert(
-          "Wajah Patokan Tersimpan",
-          "Foto ini dijadikan patokan wajah Anda. Absensi berikutnya akan diverifikasi dengan foto ini agar tidak bisa dititip orang lain.",
-        );
+        setIsEnrollmentVisible(true);
         return;
       }
 
-      const similarity = faceSimilarity(referenceEmbedding, embedding);
-      await logSimilaritySample(similarity, "unknown");
+      await logSimilaritySample(bestSimilarity, "unknown");
       // Presisi 2 desimal sengaja dipakai sementara (bukan dibulatkan ke
       // bilangan bulat) supaya angka kemiripan yang asli kelihatan buat
       // kalibrasi - "100%" yang dibulatkan bisa saja aslinya 99.4%.
-      const similarityLabel = (similarity * 100).toFixed(2);
-      if (similarity < FACE_MATCH_THRESHOLD) {
+      const similarityLabel = (bestSimilarity * 100).toFixed(2);
+      if (bestSimilarity < FACE_MATCH_THRESHOLD) {
         Alert.alert(
           "Wajah Tidak Cocok",
           `Wajah pada foto tidak cocok dengan wajah patokan absensi Anda (kemiripan ${similarityLabel}%). Absensi tidak disimpan.`,
@@ -880,15 +891,15 @@ export default function LKHScreen() {
               <Text style={styles.attendanceButtonText}>
                 {isCheckingLocation
                   ? "Memeriksa lokasi..."
-                  : hasReferenceFace
+                  : hasEnrollment
                     ? "Ambil Foto Absensi"
-                    : "Daftarkan Wajah & Absen Pertama"}
+                    : "Daftarkan Wajah (Langkah Pertama)"}
               </Text>
             </TouchableOpacity>
             <Text style={styles.attendanceHint}>
-              {hasReferenceFace
+              {hasEnrollment
                 ? `Wajah diverifikasi otomatis, dan absen hanya bisa dalam radius ${MAX_DISTANCE_KM} km dari posko.`
-                : `Foto pertama jadi patokan wajah. Absen hanya bisa dalam radius ${MAX_DISTANCE_KM} km dari posko.`}
+                : `Sebelum absen, daftarkan wajah Anda lewat 3-5 foto selfie. Absen hanya bisa dalam radius ${MAX_DISTANCE_KM} km dari posko.`}
             </Text>
 
             <View style={styles.legendContainer}>
@@ -995,9 +1006,7 @@ export default function LKHScreen() {
             <View style={styles.cameraBottomArea}>
               <BlurView intensity={50} tint="dark" style={styles.liveStatusPill}>
                 <Text style={styles.liveStatusText}>
-                  {hasReferenceFace
-                    ? `${faceQualityGate.message} (akan diverifikasi setelah jepret)`
-                    : `${faceQualityGate.message} (jadi wajah patokan)`}
+                  {`${faceQualityGate.message} (akan diverifikasi setelah jepret)`}
                 </Text>
               </BlurView>
 
@@ -1060,6 +1069,21 @@ export default function LKHScreen() {
           )}
         </SafeAreaView>
       </Modal>
+
+      {/* Modal pendaftaran wajah (enrollment terpisah). Sengaja sebagai
+          sibling dari modal kamera absen di atas - keduanya tidak akan pernah
+          visible bersamaan: gate di handleOpenAttendanceCamera menjamin kamera
+          absen hanya terbuka setelah enrollment selesai, dan dua <Modal> RN
+          yang sama-sama visible di iOS tidak reliable (lihat catatan serupa
+          di debug overlay modal kamera). */}
+      <FaceEnrollmentModal
+        visible={isEnrollmentVisible}
+        onClose={() => setIsEnrollmentVisible(false)}
+        onComplete={() => {
+          setIsEnrollmentVisible(false);
+          setHasEnrollment(true);
+        }}
+      />
     </SafeAreaView>
   );
 }

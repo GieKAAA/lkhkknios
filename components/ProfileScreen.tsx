@@ -13,12 +13,12 @@ import {
     TouchableOpacity,
     View,
 } from "react-native";
+import { getCalibrationLog } from "../utils/faceAuthNative";
 import {
-    getCalibrationLog,
     getRemainingFaceResets,
     MAX_FACE_RESETS,
-    resetReferenceFace,
-} from "../utils/faceAuthNative";
+    resetEnrollment,
+} from "../utils/faceEnrollment";
 import { getDeviceInfoStr } from "../utils/deviceInfo";
 import { isDemoModeActive, setDemoMode } from "../utils/demoMode";
 
@@ -179,21 +179,21 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
     if (remainingResets <= 0) {
       Alert.alert(
         "Batas Reset Tercapai",
-        `Wajah patokan sudah direset ${MAX_FACE_RESETS}x, batas maksimal sudah tercapai. Hubungi panitia KKN jika masih butuh reset.`,
+        `Wajah terdaftar sudah direset ${MAX_FACE_RESETS}x, batas maksimal sudah tercapai. Hubungi panitia KKN jika masih butuh reset.`,
       );
       return;
     }
 
     Alert.alert(
-      "Reset Wajah Patokan?",
-      `Wajah patokan saat ini akan dihapus. Foto absensi berikutnya akan dijadikan patokan wajah baru. Sisa kesempatan reset: ${remainingResets} dari ${MAX_FACE_RESETS}. Lanjutkan?`,
+      "Reset Wajah Terdaftar?",
+      `Seluruh set wajah terdaftar akan dihapus. Anda harus mendaftar ulang (3-5 foto selfie di halaman LKH) sebelum bisa absen lagi. Sisa kesempatan reset: ${remainingResets} dari ${MAX_FACE_RESETS}. Lanjutkan?`,
       [
         { text: "Batal", style: "cancel" },
         {
           text: "Reset",
           style: "destructive",
           onPress: async () => {
-            const success = await resetReferenceFace();
+            const success = await resetEnrollment();
             if (!success) {
               Alert.alert("Gagal", "Batas reset sudah tercapai.");
               return;
@@ -201,7 +201,7 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
             await loadReferenceFaceState();
             Alert.alert(
               "Berhasil",
-              "Wajah patokan dihapus. Foto absensi berikutnya di halaman utama akan dijadikan patokan wajah baru.",
+              "Wajah terdaftar dihapus. Buka halaman LKH dan tekan tombol absen untuk mendaftar ulang lewat 3-5 foto selfie.",
             );
           },
         },
@@ -245,7 +245,7 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
                 style={{ marginRight: 6 }}
               />
               <Text style={styles.resetFaceText}>
-                Reset Wajah Patokan ({remainingResets}/{MAX_FACE_RESETS})
+                Reset Wajah Terdaftar ({remainingResets}/{MAX_FACE_RESETS})
               </Text>
             </TouchableOpacity>
           </BlurView>

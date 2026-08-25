@@ -142,8 +142,10 @@ export const FACE_DETECTOR_OPTIONS = {
 
 const imageFaceDetector = createImageFaceDetector(FACE_DETECTOR_OPTIONS);
 
-const REFERENCE_EMBEDDING_KEY = "@face_reference_embedding_v2";
-const REFERENCE_PHOTO_KEY = "@face_reference_photo_v2";
+// Reference-embedding storage (v2 keys + reset budget + clearAllFaceData)
+// moved to utils/faceEnrollment.ts together with the separate enrollment
+// flow. Only the pre-v2 legacy keys below are still cleaned up here, from
+// inside getFaceEmbedding.
 // Old keys from the FaceRes/BlazeFace-based pipeline (1024-d, incompatible
 // dimension) - wiped once on first use of this module so a leftover old
 // reference can never get compared against a new-format embedding.
@@ -464,9 +466,11 @@ function l2Normalize(vec: Float32Array): Float32Array {
 
 /**
  * Runs the full pipeline on a captured selfie and returns its L2-normalized
- * 192-d MobileFaceNet embedding. Same function used for both enroll (first
- * photo, becomes the reference) and verify (compare against the reference)
- * - see module doc comment for why that matters. Throws
+ * 192-d MobileFaceNet embedding. Same function used by BOTH sides of every
+ * comparison - each enrollment capture (components/FaceEnrollmentModal.tsx)
+ * and every attendance probe (LKHScreen.takeSelfie) - see module doc
+ * comment for why identical preprocessing on both sides is the single most
+ * important consistency guarantee. Throws
  * NoFaceDetectedError / MultipleFacesDetectedError / PoorQualityFaceError
  * when the photo isn't usable.
  */
@@ -486,11 +490,12 @@ export async function getFaceEmbedding(photoUri: string): Promise<Float32Array> 
   // BUGFIX: a broken tensor pipeline upstream (see the platform_react_native
   // registration fix elsewhere in this file) was able to run to completion
   // without throwing while still producing an embedding full of NaN - this
-  // then got saved as the reference face via saveReferenceEmbedding(),
-  // silently poisoning every later faceSimilarity() comparison ("kemiripan
-  // NaN%") since a dot product involving NaN is always NaN. Fail loudly
-  // here instead, for both enroll and verify, so a broken embedding can
-  // never be saved or compared against in the first place.
+  // then got persisted (via what is now saveEnrollment() in
+  // faceEnrollment.ts), silently poisoning every later faceSimilarity()
+  // comparison ("kemiripan NaN%") since a dot product involving NaN is
+  // always NaN. Fail loudly here instead, for both enrollment captures and
+  // attendance probes, so a broken embedding can never be saved or compared
+  // against in the first place.
   if (embedding.some((value) => !Number.isFinite(value))) {
     throw new FaceEmbeddingInvalidError(
       "Gagal memproses foto wajah (data tidak valid). Coba ambil ulang foto.",
@@ -514,17 +519,38 @@ export function faceSimilarity(a: Float32Array | number[], b: Float32Array | num
   return dot;
 }
 
-// CALIBRATION STATUS: starting guess, not a measured value - same caveat
-// as the old pipeline. Cosine similarity between L2-normalized
-// ArcFace/CosFace-style embeddings (this model family) commonly separates
-// genuine/impostor pairs somewhere around 0.4-0.5, but that depends on
-// this exact model's training data and needs on-device verification. Every
-// attendance attempt logs its score (see logSimilaritySample below) -
-// collect a handful of your own face vs. someone else's face, look at
-// where the two clusters of numbers separate, and update this constant.
-export const FACE_MATCH_THRESHOLD = 0.5;
+// CALIBRATION STATUS: starting guess, not a measured value. RAISED from 0.5
+// when verification switched to max-of-N (bestSimilarityToEnrollment in
+// faceEnrollment.ts): a probe is now compared against EVERY enrolled
+// embedding and only the highest score has to clear this threshold - that
+// gives an impostor up to N chances to beat it instead of one, which
+// inflates impostor scores well beyond what the single-reference 0.5 era
+// produced. 0.6 is a compensating guess for that effect, NOT a measurement.
+//
+// WAJIB DIKALIBRASI ULANG SETELAH MAX-OF-N AKTIF: every attendance attempt
+// logs its score via logSimilaritySample below (see LKHScreen.takeSelfie).
+// Collect fresh self/other clusters under the multi-enrollment regime, find
+// where the two distributions separate, and move this constant there. The
+// old 0.5-era calibration data no longer applies to this threshold.
+export const FACE_MATCH_THRESHOLD = 0.6;
 
-const CALIBRATION_LOG_KEY = "@face_calibration_log";
+/**
+ * Enrollment cross-check ONLY (enforced per-capture in
+ * components/FaceEnrollmentModal.tsx): each new enrollment capture must beat
+ * this against every capture already accepted in the same session.
+ *
+ * Deliberately MUCH looser than FACE_MATCH_THRESHOLD, and a separate
+ * constant on purpose: the enrollment prompts (turn slightly left/right,
+ * change expression, different lighting) intentionally push consecutive
+ * captures of the SAME face apart, so enforcing verification-level
+ * similarity here would reject legitimate variation. This floor exists only
+ * to catch a mid-enrollment PERSON SWAP (someone else leaning into frame),
+ * not to enforce consistency. Do not reuse or unify with
+ * FACE_MATCH_THRESHOLD - they answer different questions.
+ */
+export const ENROLLMENT_CONSISTENCY_MIN = 0.35;
+
+export const CALIBRATION_LOG_KEY = "@face_calibration_log";
 const MAX_CALIBRATION_LOG_ENTRIES = 200;
 
 /**
@@ -559,64 +585,4 @@ export async function getCalibrationLog(): Promise<
 
 export async function clearCalibrationLog(): Promise<void> {
   await AsyncStorage.removeItem(CALIBRATION_LOG_KEY);
-}
-
-export async function getReferenceEmbedding(): Promise<Float32Array | null> {
-  await cleanupLegacyKeysOnce();
-  const json = await AsyncStorage.getItem(REFERENCE_EMBEDDING_KEY);
-  return json ? Float32Array.from(JSON.parse(json)) : null;
-}
-
-export async function saveReferenceEmbedding(
-  embedding: Float32Array,
-  photoUri: string,
-): Promise<void> {
-  await AsyncStorage.setItem(
-    REFERENCE_EMBEDDING_KEY,
-    JSON.stringify(Array.from(embedding)),
-  );
-  await AsyncStorage.setItem(REFERENCE_PHOTO_KEY, photoUri);
-}
-
-export async function clearReferenceEmbedding(): Promise<void> {
-  await AsyncStorage.multiRemove([REFERENCE_EMBEDDING_KEY, REFERENCE_PHOTO_KEY]);
-}
-
-const RESET_COUNT_KEY = "@face_reference_reset_count";
-export const MAX_FACE_RESETS = 3;
-
-export async function getFaceResetCount(): Promise<number> {
-  const raw = await AsyncStorage.getItem(RESET_COUNT_KEY);
-  const parsed = raw ? parseInt(raw, 10) : 0;
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-export async function getRemainingFaceResets(): Promise<number> {
-  const count = await getFaceResetCount();
-  return Math.max(0, MAX_FACE_RESETS - count);
-}
-
-/**
- * Clears the reference face so the next attendance photo becomes the new
- * baseline - e.g. when the first registration photo came out blurry or was
- * captured by mistake. Limited to MAX_FACE_RESETS uses so it can't be used
- * to repeatedly swap in someone else's face. Returns false if the limit has
- * already been reached (embedding is left untouched in that case).
- */
-export async function resetReferenceFace(): Promise<boolean> {
-  const count = await getFaceResetCount();
-  if (count >= MAX_FACE_RESETS) return false;
-  await clearReferenceEmbedding();
-  await AsyncStorage.setItem(RESET_COUNT_KEY, String(count + 1));
-  return true;
-}
-
-/** Wipes all local face-verification state, e.g. on logout/account switch. */
-export async function clearAllFaceData(): Promise<void> {
-  await AsyncStorage.multiRemove([
-    REFERENCE_EMBEDDING_KEY,
-    REFERENCE_PHOTO_KEY,
-    RESET_COUNT_KEY,
-    CALIBRATION_LOG_KEY,
-  ]);
 }
