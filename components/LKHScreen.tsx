@@ -40,7 +40,7 @@ import {
     MAX_DISTANCE_KM,
     resolvePoskoLocation,
 } from "../utils/geofence";
-import { getDeviceInfoStr } from "../utils/deviceInfo";
+import { getDeviceInfoStr, APP_VERSION } from "../utils/deviceInfo";
 import { isDemoModeActive } from "../utils/demoMode";
 
 type LKHStatus = "synced" | "unsynced" | "empty" | "today" | "none";
@@ -206,7 +206,7 @@ export default function LKHScreen() {
         const fotoName = data.foto || "274131.jpg";
 
         // PERBAIKAN: Menambahkan device_info pada URL Foto agar tidak ditolak server
-        const dbFotoUrl = `https://lkh-kkn.uin-alauddin.ac.id/api/profil-peserta?profil=${fotoName}&device_info=${getDeviceInfoStr()}&version=1.1.1`;
+        const dbFotoUrl = `https://lkh-kkn.uin-alauddin.ac.id/api/profil-peserta?profil=${fotoName}&device_info=${getDeviceInfoStr()}&version=${APP_VERSION}`;
 
         setUserData({
           nama: data.nama,
@@ -259,7 +259,7 @@ export default function LKHScreen() {
       const nim = await AsyncStorage.getItem("@user_nim");
       if (!currentToken || !nim) return;
 
-      const url = `https://lkh-kkn.uin-alauddin.ac.id/api/lkh?nim=${nim}&device_info=${getDeviceInfoStr()}&version=1.1.1`;
+      const url = `https://lkh-kkn.uin-alauddin.ac.id/api/lkh?nim=${nim}&device_info=${getDeviceInfoStr()}&version=${APP_VERSION}`;
 
       const response = await fetch(url, {
         method: "GET",
@@ -615,7 +615,7 @@ export default function LKHScreen() {
     formData.append("waktu", record.date);
     formData.append("koordinat", record.koordinat || "");
     formData.append("device_info", getDeviceInfoStr());
-    formData.append("version", "1.1.1");
+    formData.append("version", APP_VERSION);
     // React Native's FormData accepts this {uri,name,type} file shape (not
     // a real Blob) - the fetch polyfill turns it into a multipart part.
     formData.append("foto", {

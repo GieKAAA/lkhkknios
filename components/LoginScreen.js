@@ -15,7 +15,7 @@ import {
   View,
 } from "react-native";
 
-import { getDeviceInfoObject } from "../utils/deviceInfo";
+import { getDeviceInfoObject, APP_VERSION } from "../utils/deviceInfo";
 
 export default function LoginScreen({ onLoginSuccess }) {
   const [activeTab, setActiveTab] = useState("peserta");
@@ -38,7 +38,7 @@ export default function LoginScreen({ onLoginSuccess }) {
       const formData = new FormData();
       formData.append("username", nim);
       formData.append("password", password);
-      formData.append("version", "1.1.1");
+      formData.append("version", APP_VERSION);
       formData.append("device_info", deviceInfoStr);
 
       // 1. Request Token Login
@@ -50,7 +50,38 @@ export default function LoginScreen({ onLoginSuccess }) {
         },
       );
 
-      const result = await response.json();
+      // Parse aman: kalau WAF/Cloudflare membalas HTML block page,
+      // response.json() melempar SyntaxError yang dulu jatuh ke alert
+      // "kesalahan koneksi" dan menyembunyikan penyebab sebenarnya.
+      const rawText = await response.text();
+      let result;
+      try {
+        result = JSON.parse(rawText);
+      } catch (_parseError) {
+        console.error(
+          "get-token: respons non-JSON:",
+          response.status,
+          rawText.slice(0, 300),
+        );
+        Alert.alert(
+          "Gagal Login",
+          `Server merespons non-JSON (HTTP ${response.status}). Kemungkinan request diblokir Cloudflare/WAF - coba lagi beberapa saat.`,
+        );
+        return;
+      }
+
+      // DIAGNOSTIK: respons error endpoint ini TIDAK punya field `desc`
+      // (format Yii: {name, message}), dan dulu semua kegagalan tampil
+      // sebagai "NIM atau Password salah!" walau penyebabnya lain (akun
+      // terkunci, versi ditolak, SSO portal down, dst). Tampilkan pesan
+      // asli server + log mentahnya untuk diagnosis login.
+      if (!(response.ok && result.token)) {
+        console.error(
+          "get-token gagal:",
+          response.status,
+          JSON.stringify(result),
+        );
+      }
 
       if (response.ok && result.token) {
         await AsyncStorage.setItem("@user_token", result.token);
@@ -59,7 +90,7 @@ export default function LoginScreen({ onLoginSuccess }) {
         // 2. Ambil data profil HANYA dari endpoint /api/peserta
         try {
           const pesertaRes = await fetch(
-            `https://lkh-kkn.uin-alauddin.ac.id/api/peserta?nim=${nim}&device_info=${encodeURIComponent(deviceInfoStr)}&version=1.1.1`,
+            `https://lkh-kkn.uin-alauddin.ac.id/api/peserta?nim=${nim}&device_info=${encodeURIComponent(deviceInfoStr)}&version=${APP_VERSION}`,
             {
               method: "GET",
               headers: { Authorization: `Bearer ${result.token}` },
@@ -146,7 +177,18 @@ export default function LoginScreen({ onLoginSuccess }) {
           },
         ]);
       } else {
-        Alert.alert("Gagal Login", result.desc || "NIM atau Password salah!");
+        // Pesan asli server dipertahankan (desc untuk format lama, message
+        // untuk format error Yii) - jangan diubah jadi "password salah"
+        // generik karena menyembunyikan penyebab sebenarnya. Detail debug
+        // (status HTTP + potongan body mentah) sengaja ikut ditampilkan:
+        // semua kegagalan endpoint ini balasannya identik generik, jadi
+        // isi mentahnya satu-satunya petunjuk penyebab sebenarnya.
+        const detail =
+          result.desc || result.message || "(server tidak mengirim pesan)";
+        Alert.alert(
+          "Gagal Login",
+          `${detail}\n\n[debug] HTTP ${response.status} | body: ${rawText.slice(0, 200)}`,
+        );
       }
     } catch (error) {
       console.error("Login Error:", error);

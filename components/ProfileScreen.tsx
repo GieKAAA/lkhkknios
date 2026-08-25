@@ -19,7 +19,7 @@ import {
     MAX_FACE_RESETS,
     resetEnrollment,
 } from "../utils/faceEnrollment";
-import { getDeviceInfoStr } from "../utils/deviceInfo";
+import { getDeviceInfoStr, APP_VERSION } from "../utils/deviceInfo";
 import { isDemoModeActive, setDemoMode } from "../utils/demoMode";
 
 interface ProfileScreenProps {
@@ -103,7 +103,7 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
         const fotoName = data.foto || "274131.jpg";
 
         // PERBAIKAN: Menambahkan device_info
-        const dbFotoUrl = `https://lkh-kkn.uin-alauddin.ac.id/api/profil-peserta?profil=${fotoName}&device_info=${getDeviceInfoStr()}&version=1.1.1`;
+        const dbFotoUrl = `https://lkh-kkn.uin-alauddin.ac.id/api/profil-peserta?profil=${fotoName}&device_info=${getDeviceInfoStr()}&version=${APP_VERSION}`;
 
         setProfileData({
           nim: data.nim,

@@ -1,4 +1,12 @@
 /**
+ * Version string sent to every LKH API call (`version=...`). Centralized so
+ * a server-side minimum-version gate can be answered from ONE place - the
+ * official Flutter app's own version string is the value most likely to be
+ * accepted (see LoginScreen/LKHScreen usage).
+ */
+export const APP_VERSION = "1.1.1";
+
+/**
  * Fixed device fingerprint required by the LKH KKN server's security check
  * (it rejects requests whose `device_info` doesn't look like a real device).
  * Shared by LoginScreen, LKHScreen and ProfileScreen, which all talk to the
