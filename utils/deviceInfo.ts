@@ -7,6 +7,16 @@
 export const APP_VERSION = "1.1.1";
 
 /**
+ * User-Agent that mirrors the official Flutter/Dart app. Cloudflare's WAF in
+ * front of lkh-kkn.uin-alauddin.ac.id blocks requests whose User-Agent is not
+ * a Dart one (verified via scripts/login-probe3.ps1 variant 3/4: identical
+ * POST reached the backend with this UA but got an HTML block page without
+ * it). Every request to that server - fetch() AND <Image> sources alike -
+ * must send this header or it never reaches the app.
+ */
+export const API_USER_AGENT = "Dart/3.8 (dart:io)";
+
+/**
  * Fixed device fingerprint required by the LKH KKN server's security check
  * (it rejects requests whose `device_info` doesn't look like a real device).
  * Shared by LoginScreen, LKHScreen and ProfileScreen, which all talk to the

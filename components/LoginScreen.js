@@ -15,7 +15,8 @@ import {
   View,
 } from "react-native";
 
-import { getDeviceInfoObject, APP_VERSION } from "../utils/deviceInfo";
+import { startDemoSession } from "../utils/demoMode";
+import { getDeviceInfoObject, APP_VERSION, API_USER_AGENT } from "../utils/deviceInfo";
 
 export default function LoginScreen({ onLoginSuccess }) {
   const [activeTab, setActiveTab] = useState("peserta");
@@ -46,6 +47,7 @@ export default function LoginScreen({ onLoginSuccess }) {
         "https://lkh-kkn.uin-alauddin.ac.id/auth/get-token",
         {
           method: "POST",
+          headers: { "User-Agent": API_USER_AGENT },
           body: formData,
         },
       );
@@ -93,7 +95,10 @@ export default function LoginScreen({ onLoginSuccess }) {
             `https://lkh-kkn.uin-alauddin.ac.id/api/peserta?nim=${nim}&device_info=${encodeURIComponent(deviceInfoStr)}&version=${APP_VERSION}`,
             {
               method: "GET",
-              headers: { Authorization: `Bearer ${result.token}` },
+              headers: {
+                Authorization: `Bearer ${result.token}`,
+                "User-Agent": API_USER_AGENT,
+              },
             },
           );
           const pesertaJson = await pesertaRes.json();
@@ -196,6 +201,35 @@ export default function LoginScreen({ onLoginSuccess }) {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // Login lokal tanpa server: akun KKN terikat periode angkatan, jadi setelah
+  // masa KKN selesai server menolak login selamanya (401 "invalid credentials"
+  // di semua varian request - lihat scripts/login-probe*.ps1). Sesi demo
+  // memakai token dummy + mode demo aktif, sehingga catatan absen ter-tag
+  // isDemo dan tidak pernah dikirim ke server asli.
+  const handleDemoLogin = () => {
+    Alert.alert(
+      "Masuk Mode Demo",
+      "Mode demo memakai profil dummy tanpa menghubungi server. Catatan absensi ditandai demo dan TIDAK akan dikirim ke server.\n\nCocok untuk mencoba fitur saat akun KKN sudah tidak aktif.",
+      [
+        { text: "Batal", style: "cancel" },
+        {
+          text: "Masuk Demo",
+          onPress: async () => {
+            try {
+              await startDemoSession();
+              if (onLoginSuccess) {
+                onLoginSuccess();
+              }
+            } catch (e) {
+              console.error("Gagal masuk mode demo:", e);
+              Alert.alert("Error", "Gagal menyiapkan sesi demo.");
+            }
+          },
+        },
+      ],
+    );
   };
 
   return (
@@ -327,6 +361,21 @@ export default function LoginScreen({ onLoginSuccess }) {
               </View>
             )}
           </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.demoButton}
+            onPress={handleDemoLogin}
+            activeOpacity={0.8}
+          >
+            <View style={styles.buttonContent}>
+              <MaterialCommunityIcons
+                name="flask-outline"
+                size={20}
+                color="#0B753A"
+                style={{ marginRight: 8 }}
+              />
+              <Text style={styles.demoButtonText}>MASUK MODE DEMO</Text>
+            </View>
+          </TouchableOpacity>
         </View>
 
         <Text style={styles.footerText}>Versi 1.1.1</Text>
@@ -444,6 +493,20 @@ const styles = StyleSheet.create({
   loginButtonText: {
     color: "#FFF",
     fontSize: 16,
+    fontWeight: "bold",
+  },
+  demoButton: {
+    borderWidth: 1.5,
+    borderColor: "#0B753A",
+    borderRadius: 8,
+    paddingVertical: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 10,
+  },
+  demoButtonText: {
+    color: "#0B753A",
+    fontSize: 14,
     fontWeight: "bold",
   },
   footerText: {

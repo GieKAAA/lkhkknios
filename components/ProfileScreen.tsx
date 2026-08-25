@@ -19,7 +19,7 @@ import {
     MAX_FACE_RESETS,
     resetEnrollment,
 } from "../utils/faceEnrollment";
-import { getDeviceInfoStr, APP_VERSION } from "../utils/deviceInfo";
+import { getDeviceInfoStr, APP_VERSION, API_USER_AGENT } from "../utils/deviceInfo";
 import { isDemoModeActive, setDemoMode } from "../utils/demoMode";
 
 interface ProfileScreenProps {
@@ -133,7 +133,7 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
       const { uri, status } = await FileSystem.downloadAsync(url, localUri, {
         headers: {
           Authorization: `Bearer ${authToken}`,
-          "User-Agent": "Dart/3.8 (dart:io)",
+          "User-Agent": API_USER_AGENT,
           "Accept-Encoding": "gzip",
         },
       });
@@ -220,7 +220,14 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
                 // Sebelum ter-download lokal, URL ini masih endpoint yang
                 // butuh Bearer token - tanpa header ini request-nya gagal
                 // diam-diam dan foto jatuh ke placeholder abu-abu.
-                headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+                // User-Agent wajib: Cloudflare WAF memblokir request
+                // non-Dart (lihat utils/deviceInfo.ts).
+                headers: token
+                  ? {
+                      Authorization: `Bearer ${token}`,
+                      "User-Agent": API_USER_AGENT,
+                    }
+                  : { "User-Agent": API_USER_AGENT },
               }}
               style={styles.avatarImage}
               defaultSource={{
@@ -294,6 +301,11 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
                   await AsyncStorage.removeItem("@user_token");
                   await AsyncStorage.removeItem("@user_nim");
                   await AsyncStorage.removeItem("@user_profile");
+                  // Sesi demo (Masuk Mode Demo di LoginScreen) menyalakan
+                  // @demo_mode - matikan ikut di sini supaya sesi demo benar-
+                  // benar berakhir saat logout dan login asli berikutnya tidak
+                  // diam-diam masih membypass gerbang periode/geofence.
+                  await AsyncStorage.removeItem("@demo_mode");
                   // BUGFIX: used to also call clearAllFaceData() here,
                   // wiping the reference face on every logout - this app is
                   // used on the student's own personal device (see

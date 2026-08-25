@@ -40,7 +40,7 @@ import {
     MAX_DISTANCE_KM,
     resolvePoskoLocation,
 } from "../utils/geofence";
-import { getDeviceInfoStr, APP_VERSION } from "../utils/deviceInfo";
+import { getDeviceInfoStr, APP_VERSION, API_USER_AGENT } from "../utils/deviceInfo";
 import { isDemoModeActive } from "../utils/demoMode";
 
 type LKHStatus = "synced" | "unsynced" | "empty" | "today" | "none";
@@ -237,7 +237,7 @@ export default function LKHScreen() {
       const { uri, status } = await FileSystem.downloadAsync(url, localUri, {
         headers: {
           Authorization: `Bearer ${authToken}`,
-          "User-Agent": "Dart/3.8 (dart:io)",
+          "User-Agent": API_USER_AGENT,
           "Accept-Encoding": "gzip",
         },
       });
@@ -265,7 +265,7 @@ export default function LKHScreen() {
         method: "GET",
         headers: {
           Authorization: `Bearer ${currentToken}`,
-          "User-Agent": "Dart/3.8 (dart:io)",
+          "User-Agent": API_USER_AGENT,
           "Accept-Encoding": "gzip",
         },
       });
@@ -628,7 +628,7 @@ export default function LKHScreen() {
       method: "POST",
       headers: {
         Authorization: `Bearer ${authToken}`,
-        "User-Agent": "Dart/3.8 (dart:io)",
+        "User-Agent": API_USER_AGENT,
         Accept: "application/json",
       },
       body: formData,
@@ -814,8 +814,15 @@ export default function LKHScreen() {
                 // Foto profil sebelum ter-download lokal masih menunjuk ke
                 // endpoint yang butuh Bearer token - tanpa header ini,
                 // request-nya gagal diam-diam dan foto jatuh ke placeholder
-                // abu-abu (backgroundColor di bawah).
-                headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+                // abu-abu (backgroundColor di bawah). User-Agent juga wajib:
+                // Cloudflare WAF memblokir request non-Dart sebelum sampai
+                // server (lihat utils/deviceInfo.ts).
+                headers: token
+                  ? {
+                      Authorization: `Bearer ${token}`,
+                      "User-Agent": API_USER_AGENT,
+                    }
+                  : { "User-Agent": API_USER_AGENT },
               }}
               style={styles.profileImage}
               defaultSource={{
