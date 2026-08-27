@@ -16,6 +16,15 @@ name: Build iOS IPA
 
 on:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: "Image runner (WAJIB punya Xcode 26 / SDK iOS 26)"
+        type: choice
+        default: macos-26
+        options:
+          - macos-26
+          - macos-latest
+          - macos-15
 
 concurrency:
   group: ios-build
@@ -23,10 +32,40 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-15
+    # react-native-vision-camera 5.x WAJIB dikompilasi dengan SDK iOS 26.
+    # Sumbernya memakai simbol iOS 26 (.appleLog2, .proResRAW, .dogHead,
+    # .catHead, isDeferredStartSupported, ...) di dalam blok
+    # `if #available(iOS 26.0, *)`. `#available` itu cek RUNTIME - simbolnya
+    # tetap harus ADA saat KOMPILASI, jadi SDK lama gagal dengan puluhan
+    # "no member named". Runner macos-15 membawa Xcode 16.x (SDK iOS 18),
+    # itulah sebab build sebelumnya gagal.
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+
+      # Gagal di sini dalam hitungan detik dengan pesan jelas jauh lebih baik
+      # daripada gagal sepuluh menit kemudian terkubur ratusan error Swift.
+      - name: Pilih Xcode terbaru dan pastikan SDK iOS 26 tersedia
+        run: |
+          echo "Xcode yang terpasang di runner ini:"
+          ls -d /Applications/Xcode*.app 2>/dev/null || echo "  (tidak ada)"
+          NEWEST=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$NEWEST" ]; then
+            echo "Memakai: $NEWEST"
+            sudo xcode-select -s "$NEWEST"
+          fi
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i iphoneos || true
+          SDK=$(xcodebuild -showsdks | sed -n 's/.*-sdk iphoneos\([0-9][0-9.]*\).*/\1/p' | sort -V | tail -1)
+          echo "SDK iOS tertinggi: ${SDK:-TIDAK TERBACA}"
+          case "$SDK" in
+            "") echo "::error::Tidak bisa membaca versi SDK iOS." ; exit 1 ;;
+          esac
+          if [ "${SDK%%.*}" -lt 26 ]; then
+            echo "::error::Runner ini hanya punya SDK iOS $SDK. react-native-vision-camera 5.x butuh SDK iOS 26 - jalankan ulang workflow dan pilih runner lain di input 'runner'."
+            exit 1
+          fi
 
       - uses: actions/setup-node@v4
         with:
@@ -43,7 +82,17 @@ jobs:
 
       - name: Archive (unsigned)
         run: |
-          WORKSPACE=$(ls ios/*.xcworkspace | head -1)
+          # BUGFIX: `-d` is load-bearing. An .xcworkspace is a DIRECTORY, and
+          # `ls` on a directory lists its contents instead of printing the
+          # path - so a bare `ls ios/*.xcworkspace` resolved to
+          # "contents.xcworkspacedata" (the file inside it), and xcodebuild
+          # died with "'contents.xcworkspacedata' does not exist" / exit 66.
+          WORKSPACE=$(ls -d ios/*.xcworkspace 2>/dev/null | head -1)
+          if [ -z "$WORKSPACE" ]; then
+            echo "::error::Tidak ada .xcworkspace di ios/ - prebuild gagal?" >&2
+            ls -la ios 2>/dev/null >&2 || echo "folder ios/ tidak ada" >&2
+            exit 1
+          fi
           SCHEME=$(basename "$WORKSPACE" .xcworkspace)
           echo "Workspace: $WORKSPACE | Scheme: $SCHEME"
           xcodebuild \
@@ -57,7 +106,12 @@ jobs:
 
       - name: Package unsigned IPA
         run: |
-          APP_PATH=$(find build/App.xcarchive/Products/Applications -maxdepth 1 -type d -name '*.app' | head -1)
+          APP_PATH=$(find build/App.xcarchive/Products/Applications -maxdepth 1 -type d -name '*.app' 2>/dev/null | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::Tidak ada .app di dalam arsip - archive gagal?" >&2
+            find build/App.xcarchive -maxdepth 3 >&2 2>/dev/null || true
+            exit 1
+          fi
           echo "App bundle: $APP_PATH"
           STAGE="$RUNNER_TEMP/PayloadStage"
           rm -rf "$STAGE" && mkdir -p "$STAGE/Payload"

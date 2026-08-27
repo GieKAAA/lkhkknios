@@ -1,26 +1,9 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Image } from "react-native";
-import * as tf from "@tensorflow/tfjs";
-// Deep import instead of the package root: the root barrel
-// (dist/index.js) also re-exports its camera-stream helpers, which
-// statically `import "expo-camera"` - a package this project intentionally
-// no longer depends on (see module doc comment - VisionCamera replaced
-// it). decode_image.js has no such dependency (just tfjs-core + jpeg-js),
-// so importing it directly avoids dragging that unused, now-missing
-// dependency into the bundle.
-import { decodeJpeg } from "@tensorflow/tfjs-react-native/dist/decode_image";
-// BUGFIX: dist/index.js's SIDE EFFECT of `import './platform_react_native'`
-// is what actually registers tfjs-core's React Native platform
-// (`tf.setPlatform('react-native', new PlatformReactNative())`) - skipping
-// the root barrel above to dodge expo-camera also skipped this
-// registration, so `tf.ready()` resolved with no RN platform set, and any
-// tensor op that internally reads `env().platform` (e.g. inside
-// decodeJpeg/toFloat/reshape) crashed with "Cannot read property
-// 'isTypedArray' of undefined". platform_react_native.js itself only
-// imports tfjs-core/tfjs-backend-cpu/tfjs-backend-webgl/expo-gl/react-native
-// - none of which are the expo-camera dependency being avoided - so
-// importing it directly for its side effect is safe.
-import "@tensorflow/tfjs-react-native/dist/platform_react_native";
+// TensorFlow.js used to live here, purely to decode the aligned JPEG into
+// pixels. It is gone - see fileToNormalizedInputBuffer for the whole story.
+// jpeg-js is what tfjs-react-native's decodeJpeg() called underneath anyway.
+import { decode as decodeJpeg } from "jpeg-js";
 import * as FileSystem from "expo-file-system/legacy";
 import * as ImageManipulator from "expo-image-manipulator";
 import { toByteArray } from "base64-js";
@@ -82,8 +65,7 @@ import { createImageFaceDetector, Face } from "react-native-vision-camera-face-d
  *        landmarks (expo-image-manipulator; see the ARC_* constants - this
  *        is what the model was trained to receive, and getting it wrong
  *        collapses the embedding space without raising any error)
- *     -> decode the resulting small JPEG to raw pixels (tfjs-react-native's
- *        decodeJpeg - see note below on why tfjs is still a dependency)
+ *     -> decode the resulting small JPEG to raw pixels (jpeg-js)
  *     -> normalize to float32 and run through mobilefacenet.tflite
  *     -> L2-normalize the resulting 192-d embedding
  *
@@ -105,22 +87,19 @@ import { createImageFaceDetector, Face } from "react-native-vision-camera-face-d
  * image file is a well-supported, stable operation
  * (expo-image-manipulator), not a brand-new GPU pipeline.
  *
- * WHY @tensorflow/tfjs-react-native IS STILL A DEPENDENCY: only for its
- * decodeJpeg() utility, to turn the final small aligned JPEG into a raw
- * pixel tensor before normalizing it for the tflite model. It is no longer
- * used for model inference (BlazeFace/FaceRes and their bundled weight
- * files are gone - see assets/models/README.md).
+ * TENSORFLOW.JS IS NO LONGER USED ANYWHERE IN THIS APP. It survived here
+ * only for decodeJpeg(), and that turned out to be a thin wrapper around
+ * jpeg-js which this file now calls directly - see
+ * fileToNormalizedInputBuffer for why that mattered (it was producing
+ * all-NaN embeddings on device). Model inference has been fast-tflite for a
+ * while (BlazeFace/FaceRes and their weight files are long gone - see
+ * assets/models/README.md). The @tensorflow/* entries in package.json, the
+ * "bin" assetExt and the react-native-fs stub in metro.config.js exist only
+ * for tfjs and can all be removed.
  */
 
 const MODEL_INPUT_SIZE = 112;
 
-// How much square margin (relative to the detected face box's longer side)
-// to grab in the FIRST crop, before rotation. Generous on purpose: the
-// image canvas expands when rotated (see rotateLevel below), and this
-// first crop needs to be big enough that the final, tightly-cropped square
-// is still fully covered after that expansion, even for a fairly tilted
-// head. cos(30deg)+sin(30deg) ~= 1.37, so 2.4x comfortably covers rotations
-// well beyond what a normal selfie would ever have.
 /**
  * CANONICAL ALIGNMENT TEMPLATE (ArcFace/InsightFace 112x112).
  *
@@ -204,16 +183,6 @@ async function cleanupLegacyKeysOnce(): Promise<void> {
   if (legacyCleanupDone) return;
   legacyCleanupDone = true;
   await AsyncStorage.multiRemove(LEGACY_KEYS).catch(() => {});
-}
-
-let readyPromise: Promise<void> | null = null;
-function ensureTfReady(): Promise<void> {
-  // Only used for decodeJpeg() below, not for running any model - see
-  // module doc comment.
-  if (!readyPromise) {
-    readyPromise = tf.ready();
-  }
-  return readyPromise;
 }
 
 let modelPromise: Promise<TensorflowModel> | null = null;
@@ -359,12 +328,56 @@ interface Point {
   y: number;
 }
 
-/** The two eye landmarks, ordered left-to-right in image coordinates. */
+/**
+ * The two eye landmarks in TRUE image pixel coordinates, ordered
+ * left-to-right.
+ *
+ * WHY THIS IS NOT JUST `face.landmarks.LEFT_EYE`: for still images the
+ * detector library reports transposed coordinates. In its
+ * HybridFace.swift, with the still-image config (scaleX = scaleY = 1,
+ * no orientation), landmarks are built as
+ *     Point(x: position.y, y: position.x)
+ * and the box origin as
+ *     Bounds(x: bbox.minY, y: bbox.minX, width: bbox.width, height: bbox.height)
+ * i.e. the ORIGINS are swapped while width/height are not. (frameWidth /
+ * frameHeight come straight from uiImage.size and are not swapped.) That
+ * mattered little when landmarks were only used for a rotation angle - it
+ * just made the angle wrong - but canonical alignment needs absolute
+ * positions, where a transpose is fatal.
+ *
+ * Rather than hard-coding "always swap", which would silently break the day
+ * the library fixes this, the correct reading is DERIVED: the tilt of the
+ * eye line has to agree with the head roll the detector reports separately.
+ * A transpose turns a tilt of r degrees into 90 - r, so for any realistic
+ * selfie (roll well under 45 degrees) the two candidates land far apart and
+ * the choice is unambiguous. Deciding this from the face box instead does
+ * NOT work - for a roughly square box both readings can fall inside it.
+ */
 function eyePair(face: Face): [Point, Point] | null {
   const leftEye = face.landmarks?.LEFT_EYE;
   const rightEye = face.landmarks?.RIGHT_EYE;
   if (!leftEye || !rightEye) return null;
-  return leftEye.x <= rightEye.x ? [leftEye, rightEye] : [rightEye, leftEye];
+
+  const order = (a: Point, b: Point): [Point, Point] =>
+    a.x <= b.x ? [a, b] : [b, a];
+
+  const asReported = order(
+    { x: leftEye.x, y: leftEye.y },
+    { x: rightEye.x, y: rightEye.y },
+  );
+  const transposed = order(
+    { x: leftEye.y, y: leftEye.x },
+    { x: rightEye.y, y: rightEye.x },
+  );
+
+  const tiltDegrees = ([a, b]: [Point, Point]): number =>
+    Math.abs(Math.atan2(b.y - a.y, b.x - a.x) * (180 / Math.PI));
+
+  const roll = Math.abs(face.rollAngle);
+  return Math.abs(tiltDegrees(transposed) - roll) <
+    Math.abs(tiltDegrees(asReported) - roll)
+    ? transposed
+    : asReported;
 }
 
 /**
@@ -495,37 +508,53 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+/**
+ * Decodes the aligned 112x112 JPEG and normalizes it into the exact buffer
+ * mobilefacenet.tflite expects.
+ *
+ * WHY THIS NO LONGER USES TENSORFLOW.JS. This used to decode via
+ * tfjs-react-native's decodeJpeg() and then do the arithmetic with tensor
+ * ops (toFloat/sub/div/reshape). On device that pipeline produced embeddings
+ * where ALL 192 values were NaN - reported from a real install as
+ * "aligned 112x112 nan 192/192", i.e. a perfectly valid input image and
+ * completely broken output. It was never a good fit: the arithmetic here is
+ * one multiply-add per channel, and paying for a GPU tensor backend to do it
+ * dragged in backend selection, a WebGL context, and a React Native platform
+ * registration that had already caused a separate crash before (see git
+ * history for the platform_react_native fix). Any of those failing quietly
+ * yields NaN rather than an error.
+ *
+ * decodeJpeg() in tfjs-react-native was itself only a thin wrapper around
+ * jpeg-js, so decoding directly loses nothing and removes tfjs from the app
+ * entirely. `formatAsRGBA: false` asks jpeg-js for three channels so the
+ * alpha byte never has to be skipped.
+ */
 async function fileToNormalizedInputBuffer(uri: string): Promise<ArrayBuffer> {
-  await ensureTfReady();
   const base64 = await FileSystem.readAsStringAsync(uri, {
     encoding: FileSystem.EncodingType.Base64,
   });
-  const bytes = toByteArray(base64);
-  const imageTensor = decodeJpeg(bytes, 3);
-  try {
-    // (pixel - 127.5) / 128 -> roughly -1..1, the standard preprocessing
-    // for this MobileFaceNet lineage - see module doc comment.
-    const normalized = imageTensor
-      .toFloat()
-      .sub(tf.scalar(127.5))
-      .div(tf.scalar(128));
-    const batched = normalized.reshape([
-      1,
-      MODEL_INPUT_SIZE,
-      MODEL_INPUT_SIZE,
-      3,
-    ]);
-    const data = await batched.data();
-    batched.dispose();
-    normalized.dispose();
-    // Float32Array.buffer is the exact ArrayBuffer fast-tflite expects -
-    // TS types it as ArrayBufferLike (could theoretically be a
-    // SharedArrayBuffer) but a tensor's .data() always allocates a plain
-    // ArrayBuffer.
-    return (data as Float32Array).buffer as ArrayBuffer;
-  } finally {
-    imageTensor.dispose();
+  const { width, height, data } = decodeJpeg(toByteArray(base64), {
+    useTArray: true,
+    formatAsRGBA: false,
+  });
+
+  // The model input is fixed, so a mismatch means cropAlignResize produced
+  // something unexpected. Say so instead of feeding the model a wrong-sized
+  // buffer, which would fail far away from the real cause.
+  if (width !== MODEL_INPUT_SIZE || height !== MODEL_INPUT_SIZE) {
+    throw new FaceEmbeddingInvalidError(
+      `Ukuran foto hasil penyelarasan tidak sesuai (${width}x${height}, seharusnya ${MODEL_INPUT_SIZE}x${MODEL_INPUT_SIZE}).`,
+    );
   }
+
+  // (pixel - 127.5) / 128 -> roughly -1..1, the convention this
+  // MobileFaceNet lineage was trained with (see module doc comment).
+  const channels = MODEL_INPUT_SIZE * MODEL_INPUT_SIZE * 3;
+  const input = new Float32Array(channels);
+  for (let i = 0; i < channels; i++) {
+    input[i] = (data[i] - 127.5) / 128;
+  }
+  return input.buffer;
 }
 
 function l2Normalize(vec: Float32Array): Float32Array {
@@ -582,8 +611,30 @@ export async function getFaceEmbedding(photoUri: string): Promise<Float32Array> 
   // attendance probes, so a broken embedding can never be saved or compared
   // against in the first place.
   if (embedding.some((value) => !Number.isFinite(value))) {
+    // Same reasoning as the "[debug: file WxH]" string in
+    // NoFaceDetectedError: there is no Xcode console on this build, so the
+    // numbers that would identify WHICH stage went wrong have to travel out
+    // through the alert itself. Without them "data tidak valid" is a dead
+    // end - it says the embedding is NaN but nothing about why.
+    let alignedInfo = "?";
+    try {
+      const { width, height } = await getImageSize(alignedUri);
+      alignedInfo = `${width}x${height}`;
+    } catch {
+      alignedInfo = "gagal dibaca";
+    }
+    const nanCount = embedding.reduce(
+      (n, v) => n + (Number.isFinite(v) ? 0 : 1),
+      0,
+    );
     throw new FaceEmbeddingInvalidError(
-      "Gagal memproses foto wajah (data tidak valid). Coba ambil ulang foto.",
+      "Gagal memproses foto wajah (data tidak valid). Coba ambil ulang foto." +
+        ` [debug: frame ${face.frameWidth}x${face.frameHeight}` +
+        ` box ${Math.round(face.bounds.x)},${Math.round(face.bounds.y)}` +
+        ` ${Math.round(face.bounds.width)}x${Math.round(face.bounds.height)}` +
+        ` mata ${Math.round(eyes[0].x)},${Math.round(eyes[0].y)}` +
+        ` -> ${Math.round(eyes[1].x)},${Math.round(eyes[1].y)}` +
+        ` aligned ${alignedInfo} nan ${nanCount}/${embedding.length}]`,
     );
   }
   return embedding;
