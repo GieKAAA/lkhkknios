@@ -27,7 +27,7 @@ import {
     PoorQualityFaceError,
 } from "../utils/faceAuthNative";
 import {
-    bestSimilarityToEnrollment,
+    similarityToEnrollment,
     isEnrolled,
     syncEnrollmentFromServer,
 } from "../utils/faceEnrollment";
@@ -553,8 +553,10 @@ export default function LKHScreen() {
       }
 
       // Verifikasi max-of-N: bandingkan ke SEMUA embedding terdaftar dan
-      // ambil similarity tertinggi (lihat bestSimilarityToEnrollment).
-      const similarity = await bestSimilarityToEnrollment(embedding);
+      // ambil MEDIAN-nya, bukan yang tertinggi - lihat catatan panjang di
+      // similarityToEnrollment(): max-of-N memberi impostor N kesempatan
+      // menembus ambang, dan itulah sebab wajah orang lain bisa lolos.
+      const similarity = await similarityToEnrollment(embedding);
 
       if (similarity === null) {
         // Set wajah hilang di tengah jalan (misal di-reset dari halaman

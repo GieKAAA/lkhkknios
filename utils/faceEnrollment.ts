@@ -226,21 +226,43 @@ export async function saveEnrollment(
 }
 
 /**
- * Kemiripan kosinus TERTINGGI antara `query` dan setiap embedding terdaftar.
+ * Kemiripan `query` terhadap set wajah terdaftar, sebagai satu angka.
  * Null kalau belum ada yang terdaftar: pemanggil wajib memperlakukannya
  * sebagai "belum terdaftar", bukan sebagai skor 0.
+ *
+ * MEDIAN, BUKAN MAKSIMUM - ini perbaikan inti untuk bug "wajah orang lain
+ * bisa absen". max-of-N memberi impostor N kesempatan menembus ambang, bukan
+ * satu: cukup SATU foto enrollment yang kebetulan berpose/berpencahayaan mirip
+ * untuk meloloskannya. Median menuntut kecocokan dengan MAYORITAS wajah
+ * terdaftar, sehingga satu kebetulan tidak lagi cukup.
+ *
+ * Diukur, bukan diasumsikan (tools/face-calibration, 2026-08-27) - jarak
+ * antara skor genuine terendah dan skor impostor tertinggi, dengan crop
+ * terkalibrasi:
+ *     enrollment 3 foto:  max +0.234  top2 +0.257  mean +0.245  median +0.279
+ *     enrollment 4 foto:  max +0.206  top2 +0.220  mean +0.235  median +0.257
+ *     enrollment 5 foto:  max +0.206  top2 +0.220  mean +0.215  median +0.279
+ * Median menang di ketiga ukuran enrollment, max kalah di ketiganya.
+ *
+ * TERIKAT PADA FINAL_CROP_RATIO: pada crop lama yang terlalu ketat (1.3),
+ * urutan ini justru TERBALIK - max yang menang, karena semua skor berdesakan
+ * sehingga median ikut tertarik ke bawah menembus ambang. Jadi median hanya
+ * benar bersama crop yang terkalibrasi. Kalau FINAL_CROP_RATIO diubah,
+ * ukur ulang keduanya bersamaan.
  */
-export async function bestSimilarityToEnrollment(
+export async function similarityToEnrollment(
   query: Float32Array | number[],
 ): Promise<number | null> {
   const enrolled = await getEnrollments();
   if (!enrolled || enrolled.length === 0) return null;
-  let best = -Infinity;
-  for (const reference of enrolled) {
-    const similarity = faceSimilarity(query, reference);
-    if (similarity > best) best = similarity;
-  }
-  return best;
+
+  const scores = enrolled
+    .map((reference) => faceSimilarity(query, reference))
+    .sort((a, b) => a - b);
+  const mid = scores.length >> 1;
+  return scores.length % 2 === 0
+    ? (scores[mid - 1] + scores[mid]) / 2
+    : scores[mid];
 }
 
 export async function clearEnrollment(): Promise<void> {

@@ -16,3 +16,10 @@ android/.gradle/
 *.mobileprovision
 .DS_Store
 *.log
+
+# tools/face-calibration (Python)
+__pycache__/
+*.pyc
+.venv/
+tools/face-calibration/photos/
+tools/face-calibration/hasil-kalibrasi.csv
