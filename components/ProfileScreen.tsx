@@ -15,9 +15,10 @@ import {
 } from "react-native";
 import { getCalibrationLog } from "../utils/faceAuthNative";
 import {
-    getRemainingFaceResets,
+    getResetQuota,
     MAX_FACE_RESETS,
     resetEnrollment,
+    type ResetQuota,
 } from "../utils/faceEnrollment";
 import { getDeviceInfoStr, APP_VERSION, API_USER_AGENT } from "../utils/deviceInfo";
 import { isDemoModeActive, setDemoMode } from "../utils/demoMode";
@@ -55,7 +56,14 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
   });
 
   const [token, setToken] = useState<string>("");
-  const [remainingResets, setRemainingResets] = useState<number>(MAX_FACE_RESETS);
+  // Jatah reset otoritasnya di server (app Android memakai /api/jumlah-reset
+  // & /api/max-reset) - nilai awal di bawah cuma penampil sementara sebelum
+  // jawaban server masuk, dan jadi cadangan kalau server tak terjangkau.
+  const [resetQuota, setResetQuota] = useState<ResetQuota>({
+    remaining: MAX_FACE_RESETS,
+    max: MAX_FACE_RESETS,
+    fromServer: false,
+  });
   const [demoModeActive, setDemoModeActive] = useState(false);
 
   // Sengaja cuma jalan sekali saat mount - lihat catatan yang sama di
@@ -68,7 +76,7 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
   }, []);
 
   const loadReferenceFaceState = async () => {
-    setRemainingResets(await getRemainingFaceResets());
+    setResetQuota(await getResetQuota());
   };
 
   const handleToggleDemoMode = () => {
@@ -176,17 +184,17 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
   };
 
   const handleResetReferenceFace = () => {
-    if (remainingResets <= 0) {
+    if (resetQuota.remaining <= 0) {
       Alert.alert(
         "Batas Reset Tercapai",
-        `Wajah terdaftar sudah direset ${MAX_FACE_RESETS}x, batas maksimal sudah tercapai. Hubungi panitia KKN jika masih butuh reset.`,
+        `Wajah terdaftar sudah direset ${resetQuota.max}x, batas maksimal sudah tercapai. Hubungi panitia KKN jika masih butuh reset.`,
       );
       return;
     }
 
     Alert.alert(
       "Reset Wajah Terdaftar?",
-      `Seluruh set wajah terdaftar akan dihapus. Anda harus mendaftar ulang (3-5 foto selfie di halaman LKH) sebelum bisa absen lagi. Sisa kesempatan reset: ${remainingResets} dari ${MAX_FACE_RESETS}. Lanjutkan?`,
+      `Seluruh set wajah terdaftar akan dihapus dari server dan perangkat ini. Anda harus mendaftar ulang (3-5 foto selfie di halaman LKH) sebelum bisa absen lagi. Sisa kesempatan reset: ${resetQuota.remaining} dari ${resetQuota.max}. Lanjutkan?`,
       [
         { text: "Batal", style: "cancel" },
         {
@@ -240,7 +248,7 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
             <TouchableOpacity
               style={[
                 styles.resetFaceButton,
-                remainingResets <= 0 && styles.resetFaceButtonDisabled,
+                resetQuota.remaining <= 0 && styles.resetFaceButtonDisabled,
               ]}
               onPress={handleResetReferenceFace}
               activeOpacity={0.8}
@@ -252,7 +260,7 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
                 style={{ marginRight: 6 }}
               />
               <Text style={styles.resetFaceText}>
-                Reset Wajah Terdaftar ({remainingResets}/{MAX_FACE_RESETS})
+                Reset Wajah Terdaftar ({resetQuota.remaining}/{resetQuota.max})
               </Text>
             </TouchableOpacity>
           </BlurView>
