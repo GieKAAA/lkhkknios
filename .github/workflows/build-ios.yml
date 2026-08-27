@@ -16,6 +16,15 @@ name: Build iOS IPA
 
 on:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: "Image runner (WAJIB punya Xcode 26 / SDK iOS 26)"
+        type: choice
+        default: macos-26
+        options:
+          - macos-26
+          - macos-latest
+          - macos-15
 
 concurrency:
   group: ios-build
@@ -23,10 +32,40 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-15
+    # react-native-vision-camera 5.x WAJIB dikompilasi dengan SDK iOS 26.
+    # Sumbernya memakai simbol iOS 26 (.appleLog2, .proResRAW, .dogHead,
+    # .catHead, isDeferredStartSupported, ...) di dalam blok
+    # `if #available(iOS 26.0, *)`. `#available` itu cek RUNTIME - simbolnya
+    # tetap harus ADA saat KOMPILASI, jadi SDK lama gagal dengan puluhan
+    # "no member named". Runner macos-15 membawa Xcode 16.x (SDK iOS 18),
+    # itulah sebab build sebelumnya gagal.
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+
+      # Gagal di sini dalam hitungan detik dengan pesan jelas jauh lebih baik
+      # daripada gagal sepuluh menit kemudian terkubur ratusan error Swift.
+      - name: Pilih Xcode terbaru dan pastikan SDK iOS 26 tersedia
+        run: |
+          echo "Xcode yang terpasang di runner ini:"
+          ls -d /Applications/Xcode*.app 2>/dev/null || echo "  (tidak ada)"
+          NEWEST=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$NEWEST" ]; then
+            echo "Memakai: $NEWEST"
+            sudo xcode-select -s "$NEWEST"
+          fi
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i iphoneos || true
+          SDK=$(xcodebuild -showsdks | sed -n 's/.*-sdk iphoneos\([0-9][0-9.]*\).*/\1/p' | sort -V | tail -1)
+          echo "SDK iOS tertinggi: ${SDK:-TIDAK TERBACA}"
+          case "$SDK" in
+            "") echo "::error::Tidak bisa membaca versi SDK iOS." ; exit 1 ;;
+          esac
+          if [ "${SDK%%.*}" -lt 26 ]; then
+            echo "::error::Runner ini hanya punya SDK iOS $SDK. react-native-vision-camera 5.x butuh SDK iOS 26 - jalankan ulang workflow dan pilih runner lain di input 'runner'."
+            exit 1
+          fi
 
       - uses: actions/setup-node@v4
         with:
