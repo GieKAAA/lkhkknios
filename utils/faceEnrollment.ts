@@ -420,3 +420,54 @@ export async function clearAllFaceData(): Promise<void> {
     CALIBRATION_LOG_KEY,
   ]);
 }
+
+/**
+ * Ringkasan mentah isi penyimpanan wajah, untuk ditampilkan lewat Alert di
+ * halaman Profil.
+ *
+ * Ada karena build sideload tidak punya console: saat state wajah terlihat
+ * salah, satu-satunya cara mengetahui SIAPA yang salah - datanya memang
+ * hilang, tersimpan di namespace yang keliru, atau terbaca rusak - adalah
+ * mengeluarkan angkanya lewat UI. Menampilkan KEDUA namespace sekaligus,
+ * karena justru perbandingannya yang menjawab pertanyaan itu.
+ */
+export async function describeFaceStorage(): Promise<string> {
+  const [token, nim, demoFlag] = await Promise.all([
+    AsyncStorage.getItem("@user_token"),
+    AsyncStorage.getItem("@user_nim"),
+    AsyncStorage.getItem("@demo_mode"),
+  ]);
+  const keys = await storageKeys();
+
+  const lines = [
+    `Sesi     : ${keys.isDemoSession ? "DEMO" : "AKUN ASLI"}`,
+    `NIM      : ${nim ?? "-"}`,
+    `Token    : ${token ? token.slice(0, 12) + "..." : "(tidak ada)"}`,
+    `Mode demo: ${demoFlag === "1" ? "aktif" : "mati"}`,
+    `Key aktif: ${keys.enrollment}`,
+  ];
+
+  for (const [label, suffix] of [
+    ["ASLI", ""],
+    ["DEMO", "_demo"],
+  ] as const) {
+    const raw = await AsyncStorage.getItem(ENROLLMENT_KEY + suffix);
+    const parsed = parseEnrollment(raw);
+    const used = await AsyncStorage.getItem(RESET_COUNT_KEY + suffix);
+    const pending = await AsyncStorage.getItem(PENDING_PUSH_KEY + suffix);
+    lines.push(
+      "",
+      `[${label}]`,
+      `  wajah  : ${
+        parsed
+          ? `${parsed.embeddings.length} embedding`
+          : raw
+            ? `ADA TAPI DITOLAK (${raw.length} char)`
+            : "kosong"
+      }`,
+      `  reset  : ${used ?? 0} terpakai`,
+      `  antre  : ${pending ? "ya" : "tidak"}`,
+    );
+  }
+  return lines.join("\n");
+}

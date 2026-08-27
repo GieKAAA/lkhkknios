@@ -15,6 +15,7 @@ import {
 } from "react-native";
 import { getCalibrationLog } from "../utils/faceAuthNative";
 import {
+    describeFaceStorage,
     getResetQuota,
     MAX_FACE_RESETS,
     resetEnrollment,
@@ -182,6 +183,14 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
       `Log Kemiripan Wajah (${log.length} total, 10 terbaru)`,
       lines.join("\n"),
     );
+  };
+
+  // Diagnostik: build sideload tidak punya console, jadi state penyimpanan
+  // wajah hanya bisa diperiksa lewat layar. Menampilkan kedua namespace
+  // (asli + demo) supaya ketahuan apakah data hilang, tersimpan di tempat
+  // yang keliru, atau terbaca rusak.
+  const handleViewFaceState = async () => {
+    Alert.alert("Status Data Wajah", await describeFaceStorage());
   };
 
   const handleResetReferenceFace = () => {
@@ -381,6 +390,20 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
             style={{ marginRight: 8 }}
           />
           <Text style={styles.demoButtonText}>Lihat Log Kemiripan Wajah</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.demoButton}
+          onPress={handleViewFaceState}
+          activeOpacity={0.85}
+        >
+          <Ionicons
+            name="bug-outline"
+            size={18}
+            color="#6E6E73"
+            style={{ marginRight: 8 }}
+          />
+          <Text style={styles.demoButtonText}>Status Data Wajah</Text>
         </TouchableOpacity>
 
         {/* Aplikasi ini dipasang lewat sideload, sering beberapa build
