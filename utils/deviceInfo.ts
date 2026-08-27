@@ -3,6 +3,13 @@
  * a server-side minimum-version gate can be answered from ONE place - the
  * official Flutter app's own version string is the value most likely to be
  * accepted (see LoginScreen/LKHScreen usage).
+ *
+ * THIS IS NOT THE APP'S VERSION. It is a protocol constant that has to keep
+ * matching whatever the official Android app sends, so it must NOT be bumped
+ * per release or per build - raising it risks the server rejecting us. The
+ * app's own version lives in app.json (expo.version + ios.buildNumber, the
+ * latter stamped per CI run) and is what the Login and Profile screens show.
+ * The two only happen to share the word "version".
  */
 export const APP_VERSION = "1.1.1";
 

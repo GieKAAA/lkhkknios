@@ -1,5 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { CALIBRATION_LOG_KEY, faceSimilarity } from "./faceAuthNative";
+import { DEMO_TOKEN } from "./demoMode";
 import {
   fetchServerEnrollment,
   fetchServerResetInfo,
@@ -79,6 +80,44 @@ async function getSession(): Promise<{ nim: string | null; token: string | null 
   return { nim, token };
 }
 
+/**
+ * Key penyimpanan wajah, DIPISAH antara sesi demo dan akun asli.
+ *
+ * BUGFIX: sebelumnya keduanya memakai key yang sama persis, sehingga apa pun
+ * yang dilakukan dalam sesi demo bocor ke akun sungguhan - reset wajah di
+ * demo memakan jatah akun asli (3/3 jadi 2/3) dan wajah yang terdaftar di
+ * demo membuat akun asli tampak sudah/belum terdaftar secara keliru.
+ *
+ * Pembedanya sengaja TOKEN, bukan flag @demo_mode. Keduanya berbeda: sesi
+ * demo (startDemoSession di LoginScreen) adalah "akun" tersendiri dengan
+ * token dummy, sedangkan @demo_mode juga bisa dinyalakan oleh akun ASLI dari
+ * halaman Profil hanya untuk melewati gerbang periode/geofence. Kalau flag
+ * itu yang dipakai sebagai pembeda, akun asli yang menyalakan Mode Demo akan
+ * mendadak tampak belum mendaftarkan wajah.
+ *
+ * Memisahkan namespace, bukan menghapus data saat berpindah: menghapus akan
+ * memusnahkan enrollment akun asli, dan akun yang servernya tidak terjangkau
+ * (periode KKN lewat) tidak punya cara memulihkannya.
+ */
+interface FaceKeys {
+  enrollment: string;
+  resetCount: string;
+  pendingPush: string;
+  isDemoSession: boolean;
+}
+
+async function storageKeys(): Promise<FaceKeys> {
+  const isDemoSession =
+    (await AsyncStorage.getItem("@user_token")) === DEMO_TOKEN;
+  const suffix = isDemoSession ? "_demo" : "";
+  return {
+    enrollment: ENROLLMENT_KEY + suffix,
+    resetCount: RESET_COUNT_KEY + suffix,
+    pendingPush: PENDING_PUSH_KEY + suffix,
+    isDemoSession,
+  };
+}
+
 function parseEnrollment(raw: string | null): StoredEnrollment | null {
   if (!raw) return null;
   try {
@@ -102,6 +141,7 @@ function parseEnrollment(raw: string | null): StoredEnrollment | null {
 async function writeLocalEnrollment(
   embeddings: number[][],
   photos: string[],
+  key?: string,
 ): Promise<void> {
   const enrollment: StoredEnrollment = {
     version: 3,
@@ -109,7 +149,10 @@ async function writeLocalEnrollment(
     embeddings,
     photos,
   };
-  await AsyncStorage.setItem(ENROLLMENT_KEY, JSON.stringify(enrollment));
+  await AsyncStorage.setItem(
+    key ?? (await storageKeys()).enrollment,
+    JSON.stringify(enrollment),
+  );
 }
 
 /**
@@ -121,6 +164,11 @@ async function writeLocalEnrollment(
  */
 async function migrateLegacyV2Once(): Promise<void> {
   if (migrationDone) return;
+  const keys = await storageKeys();
+  // Key v2 berasal dari sebelum ada mode demo, jadi isinya milik akun asli.
+  // Jangan dimigrasikan ke namespace demo - dan jangan ditandai selesai,
+  // supaya migrasinya tetap jalan begitu pengguna login ke akun asli.
+  if (keys.isDemoSession) return;
   try {
     const raw = await AsyncStorage.getItem(LEGACY_EMBEDDING_KEY);
     if (raw) {
@@ -131,15 +179,16 @@ async function migrateLegacyV2Once(): Promise<void> {
         parsed.every((v) => typeof v === "number" && Number.isFinite(v));
       if (
         usable &&
-        parseEnrollment(await AsyncStorage.getItem(ENROLLMENT_KEY)) === null
+        parseEnrollment(await AsyncStorage.getItem(keys.enrollment)) === null
       ) {
         const photoUri = await AsyncStorage.getItem(LEGACY_PHOTO_KEY);
         await writeLocalEnrollment(
           [parsed as number[]],
           photoUri ? [photoUri] : [],
+          keys.enrollment,
         );
         // Hasil migrasi belum pernah dikenal server - antrekan untuk dikirim.
-        await AsyncStorage.setItem(PENDING_PUSH_KEY, "1");
+        await AsyncStorage.setItem(keys.pendingPush, "1");
       }
       await AsyncStorage.multiRemove([LEGACY_EMBEDDING_KEY, LEGACY_PHOTO_KEY]);
     }
@@ -152,7 +201,8 @@ async function migrateLegacyV2Once(): Promise<void> {
 
 async function readLocalEnrollment(): Promise<StoredEnrollment | null> {
   await migrateLegacyV2Once();
-  return parseEnrollment(await AsyncStorage.getItem(ENROLLMENT_KEY));
+  const { enrollment } = await storageKeys();
+  return parseEnrollment(await AsyncStorage.getItem(enrollment));
 }
 
 export async function isEnrolled(): Promise<boolean> {
@@ -175,12 +225,13 @@ export async function syncEnrollmentFromServer(): Promise<SyncOutcome> {
   await migrateLegacyV2Once();
   const { nim, token } = await getSession();
 
+  const keys = await storageKeys();
   try {
     const remote = await fetchServerEnrollment(nim, token);
     if (remote) {
       const local = await readLocalEnrollment();
-      await writeLocalEnrollment(remote, local?.photos ?? []);
-      await AsyncStorage.removeItem(PENDING_PUSH_KEY);
+      await writeLocalEnrollment(remote, local?.photos ?? [], keys.enrollment);
+      await AsyncStorage.removeItem(keys.pendingPush);
       return "updated";
     }
     // Server terjangkau tapi belum punya wajah untuk akun ini. Kalau ada
@@ -188,13 +239,13 @@ export async function syncEnrollmentFromServer(): Promise<SyncOutcome> {
     const local = await readLocalEnrollment();
     if (local) {
       await pushServerEnrollment(nim, token, local.embeddings);
-      await AsyncStorage.removeItem(PENDING_PUSH_KEY);
+      await AsyncStorage.removeItem(keys.pendingPush);
       return "pushed";
     }
     return "updated";
   } catch {
     const local = await readLocalEnrollment();
-    if (local && (await AsyncStorage.getItem(PENDING_PUSH_KEY))) return "pending";
+    if (local && (await AsyncStorage.getItem(keys.pendingPush))) return "pending";
     return "unavailable";
   }
 }
@@ -212,15 +263,16 @@ export async function saveEnrollment(
     throw new Error("Tidak ada data wajah untuk disimpan.");
   }
   const plain = embeddings.map((e) => Array.from(e));
-  await writeLocalEnrollment(plain, photoUris);
+  const keys = await storageKeys();
+  await writeLocalEnrollment(plain, photoUris, keys.enrollment);
 
   const { nim, token } = await getSession();
   try {
     await pushServerEnrollment(nim, token, plain);
-    await AsyncStorage.removeItem(PENDING_PUSH_KEY);
+    await AsyncStorage.removeItem(keys.pendingPush);
     return "pushed";
   } catch {
-    await AsyncStorage.setItem(PENDING_PUSH_KEY, "1");
+    await AsyncStorage.setItem(keys.pendingPush, "1");
     return "pending";
   }
 }
@@ -266,11 +318,12 @@ export async function similarityToEnrollment(
 }
 
 export async function clearEnrollment(): Promise<void> {
-  await AsyncStorage.multiRemove([ENROLLMENT_KEY, PENDING_PUSH_KEY]);
+  const keys = await storageKeys();
+  await AsyncStorage.multiRemove([keys.enrollment, keys.pendingPush]);
 }
 
 async function getLocalResetCount(): Promise<number> {
-  const raw = await AsyncStorage.getItem(RESET_COUNT_KEY);
+  const raw = await AsyncStorage.getItem((await storageKeys()).resetCount);
   const parsed = raw ? parseInt(raw, 10) : 0;
   return Number.isFinite(parsed) ? parsed : 0;
 }
@@ -292,7 +345,10 @@ export async function getResetQuota(): Promise<ResetQuota> {
   try {
     const info = await fetchServerResetInfo(nim, token);
     if (info) {
-      await AsyncStorage.setItem(RESET_COUNT_KEY, String(info.used));
+      await AsyncStorage.setItem(
+        (await storageKeys()).resetCount,
+        String(info.used),
+      );
       return {
         remaining: Math.max(0, info.max - info.used),
         max: info.max,
@@ -328,7 +384,10 @@ export async function resetEnrollment(): Promise<boolean> {
       if (info.used >= info.max) return false;
       await requestServerReset(nim, token);
       await clearEnrollment();
-      await AsyncStorage.setItem(RESET_COUNT_KEY, String(info.used + 1));
+      await AsyncStorage.setItem(
+        (await storageKeys()).resetCount,
+        String(info.used + 1),
+      );
       return true;
     }
   } catch {
@@ -339,18 +398,25 @@ export async function resetEnrollment(): Promise<boolean> {
   const count = await getLocalResetCount();
   if (count >= MAX_FACE_RESETS) return false;
   await clearEnrollment();
-  await AsyncStorage.setItem(RESET_COUNT_KEY, String(count + 1));
+  await AsyncStorage.setItem(
+    (await storageKeys()).resetCount,
+    String(count + 1),
+  );
   return true;
 }
 
 /** Hapus seluruh state verifikasi wajah lokal, misalnya saat ganti akun. */
+/** Hapus SEMUA state wajah lokal - kedua namespace sekaligus (asli + demo). */
 export async function clearAllFaceData(): Promise<void> {
   await AsyncStorage.multiRemove([
     ENROLLMENT_KEY,
     PENDING_PUSH_KEY,
+    RESET_COUNT_KEY,
+    ENROLLMENT_KEY + "_demo",
+    PENDING_PUSH_KEY + "_demo",
+    RESET_COUNT_KEY + "_demo",
     LEGACY_EMBEDDING_KEY,
     LEGACY_PHOTO_KEY,
-    RESET_COUNT_KEY,
     CALIBRATION_LOG_KEY,
   ]);
 }

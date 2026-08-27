@@ -17,6 +17,7 @@ import {
 
 import { startDemoSession } from "../utils/demoMode";
 import { getDeviceInfoObject, APP_VERSION, API_USER_AGENT } from "../utils/deviceInfo";
+import Constants from "expo-constants";
 
 export default function LoginScreen({ onLoginSuccess }) {
   const [activeTab, setActiveTab] = useState("peserta");
@@ -378,7 +379,14 @@ export default function LoginScreen({ onLoginSuccess }) {
           </TouchableOpacity>
         </View>
 
-        <Text style={styles.footerText}>Versi 1.1.1</Text>
+        {/* Angkanya dibaca dari app.json, bukan ditulis tangan seperti
+            sebelumnya - versi hardcode di sini sempat menyimpang dari versi
+            aplikasi yang sebenarnya. Ini versi APLIKASI; APP_VERSION di
+            utils/deviceInfo.ts adalah hal berbeda yang dikirim ke server. */}
+        <Text style={styles.footerText}>
+          Versi {Constants.expoConfig?.version ?? "?"} (build{" "}
+          {Constants.expoConfig?.ios?.buildNumber ?? "?"})
+        </Text>
       </ScrollView>
     </KeyboardAvoidingView>
   );
