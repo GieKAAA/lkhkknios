@@ -178,25 +178,6 @@ export default function FaceEnrollmentModal({
   return (
     <Modal visible={visible} animationType="slide">
       <SafeAreaView style={styles.container}>
-        <View style={styles.header}>
-          <TouchableOpacity
-            style={styles.closeBtn}
-            onPress={onClose}
-            disabled={isProcessingFace}
-          >
-            <BlurView intensity={50} tint="dark" style={styles.closeBtnBlur}>
-              <Ionicons name="close" size={24} color="#FFF" />
-            </BlurView>
-          </TouchableOpacity>
-          <View style={styles.headerTextWrap}>
-            <Text style={styles.title}>Daftarkan Wajah</Text>
-            <Text style={styles.subtitle}>
-              Ambil {MIN_ENROLLMENT_PHOTOS}-{MAX_ENROLLMENT_PHOTOS} foto selfie
-              sebagai patokan verifikasi absensi
-            </Text>
-          </View>
-        </View>
-
         {hasPermission && cameraDevice ? (
           <FaceDetectorCamera
             style={styles.camera}
@@ -229,6 +210,33 @@ export default function FaceEnrollmentModal({
             )}
           </View>
         )}
+
+        {/* BUGFIX: header sengaja dirender SETELAH <FaceDetectorCamera>.
+            Sebelumnya ia ada di atas kamera dalam urutan JSX dan hanya
+            mengandalkan zIndex:10 - tapi preview kamera adalah view NATIVE
+            yang menimpa urutan itu, sehingga tombol X tidak pernah menerima
+            sentuhan. LKHScreen sudah memakai urutan ini (kontrol setelah
+            kamera) dan tombol closenya berfungsi; disamakan ke sana.
+            pointerEvents="box-none" supaya area kosong header tidak ikut
+            menelan sentuhan yang ditujukan ke kamera/tombol lain. */}
+        <View style={styles.header} pointerEvents="box-none">
+          <TouchableOpacity
+            style={styles.closeBtn}
+            onPress={onClose}
+            disabled={isProcessingFace}
+          >
+            <BlurView intensity={50} tint="dark" style={styles.closeBtnBlur}>
+              <Ionicons name="close" size={24} color="#FFF" />
+            </BlurView>
+          </TouchableOpacity>
+          <View style={styles.headerTextWrap} pointerEvents="none">
+            <Text style={styles.title}>Daftarkan Wajah</Text>
+            <Text style={styles.subtitle}>
+              Ambil {MIN_ENROLLMENT_PHOTOS}-{MAX_ENROLLMENT_PHOTOS} foto selfie
+              sebagai patokan verifikasi absensi
+            </Text>
+          </View>
+        </View>
 
         <View style={styles.bottomArea} pointerEvents="box-none">
           <BlurView intensity={50} tint="dark" style={styles.statusPill}>

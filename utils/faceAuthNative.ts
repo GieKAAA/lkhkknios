@@ -359,12 +359,56 @@ interface Point {
   y: number;
 }
 
-/** The two eye landmarks, ordered left-to-right in image coordinates. */
+/**
+ * The two eye landmarks in TRUE image pixel coordinates, ordered
+ * left-to-right.
+ *
+ * WHY THIS IS NOT JUST `face.landmarks.LEFT_EYE`: for still images the
+ * detector library reports transposed coordinates. In its
+ * HybridFace.swift, with the still-image config (scaleX = scaleY = 1,
+ * no orientation), landmarks are built as
+ *     Point(x: position.y, y: position.x)
+ * and the box origin as
+ *     Bounds(x: bbox.minY, y: bbox.minX, width: bbox.width, height: bbox.height)
+ * i.e. the ORIGINS are swapped while width/height are not. (frameWidth /
+ * frameHeight come straight from uiImage.size and are not swapped.) That
+ * mattered little when landmarks were only used for a rotation angle - it
+ * just made the angle wrong - but canonical alignment needs absolute
+ * positions, where a transpose is fatal.
+ *
+ * Rather than hard-coding "always swap", which would silently break the day
+ * the library fixes this, the correct reading is DERIVED: the tilt of the
+ * eye line has to agree with the head roll the detector reports separately.
+ * A transpose turns a tilt of r degrees into 90 - r, so for any realistic
+ * selfie (roll well under 45 degrees) the two candidates land far apart and
+ * the choice is unambiguous. Deciding this from the face box instead does
+ * NOT work - for a roughly square box both readings can fall inside it.
+ */
 function eyePair(face: Face): [Point, Point] | null {
   const leftEye = face.landmarks?.LEFT_EYE;
   const rightEye = face.landmarks?.RIGHT_EYE;
   if (!leftEye || !rightEye) return null;
-  return leftEye.x <= rightEye.x ? [leftEye, rightEye] : [rightEye, leftEye];
+
+  const order = (a: Point, b: Point): [Point, Point] =>
+    a.x <= b.x ? [a, b] : [b, a];
+
+  const asReported = order(
+    { x: leftEye.x, y: leftEye.y },
+    { x: rightEye.x, y: rightEye.y },
+  );
+  const transposed = order(
+    { x: leftEye.y, y: leftEye.x },
+    { x: rightEye.y, y: rightEye.x },
+  );
+
+  const tiltDegrees = ([a, b]: [Point, Point]): number =>
+    Math.abs(Math.atan2(b.y - a.y, b.x - a.x) * (180 / Math.PI));
+
+  const roll = Math.abs(face.rollAngle);
+  return Math.abs(tiltDegrees(transposed) - roll) <
+    Math.abs(tiltDegrees(asReported) - roll)
+    ? transposed
+    : asReported;
 }
 
 /**
@@ -582,8 +626,30 @@ export async function getFaceEmbedding(photoUri: string): Promise<Float32Array> 
   // attendance probes, so a broken embedding can never be saved or compared
   // against in the first place.
   if (embedding.some((value) => !Number.isFinite(value))) {
+    // Same reasoning as the "[debug: file WxH]" string in
+    // NoFaceDetectedError: there is no Xcode console on this build, so the
+    // numbers that would identify WHICH stage went wrong have to travel out
+    // through the alert itself. Without them "data tidak valid" is a dead
+    // end - it says the embedding is NaN but nothing about why.
+    let alignedInfo = "?";
+    try {
+      const { width, height } = await getImageSize(alignedUri);
+      alignedInfo = `${width}x${height}`;
+    } catch {
+      alignedInfo = "gagal dibaca";
+    }
+    const nanCount = embedding.reduce(
+      (n, v) => n + (Number.isFinite(v) ? 0 : 1),
+      0,
+    );
     throw new FaceEmbeddingInvalidError(
-      "Gagal memproses foto wajah (data tidak valid). Coba ambil ulang foto.",
+      "Gagal memproses foto wajah (data tidak valid). Coba ambil ulang foto." +
+        ` [debug: frame ${face.frameWidth}x${face.frameHeight}` +
+        ` box ${Math.round(face.bounds.x)},${Math.round(face.bounds.y)}` +
+        ` ${Math.round(face.bounds.width)}x${Math.round(face.bounds.height)}` +
+        ` mata ${Math.round(eyes[0].x)},${Math.round(eyes[0].y)}` +
+        ` -> ${Math.round(eyes[1].x)},${Math.round(eyes[1].y)}` +
+        ` aligned ${alignedInfo} nan ${nanCount}/${embedding.length}]`,
     );
   }
   return embedding;
