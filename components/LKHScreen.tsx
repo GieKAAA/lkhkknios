@@ -43,6 +43,7 @@ import {
 } from "../utils/geofence";
 import { getDeviceInfoStr, APP_VERSION, API_USER_AGENT } from "../utils/deviceInfo";
 import { isDemoModeActive } from "../utils/demoMode";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 type LKHStatus = "synced" | "unsynced" | "empty" | "today" | "none";
 
@@ -146,6 +147,7 @@ export default function LKHScreen() {
     targetResolution: CommonResolutions.FHD_16_9,
   });
   const faceQualityGate = useFaceQualityGate();
+  const insets = useSafeAreaInsets();
   const [isCameraVisible, setIsCameraVisible] = useState(false);
   // Enrollment terpisah (FaceEnrollmentModal) - terbuka saat user mencoba
   // absen tanpa punya set wajah terdaftar. Menggantikan jalur lama di mana
@@ -975,7 +977,11 @@ export default function LKHScreen() {
       </Modal>
 
       <Modal visible={isCameraVisible} animationType="slide">
-        <SafeAreaView style={styles.cameraContainer}>
+        {/* View polos + inset eksplisit, bukan SafeAreaView - alasan lengkap
+            ada di komentar header FaceEnrollmentModal. Singkatnya: tombol
+            close yang duduk di dalam area status bar / Dynamic Island tidak
+            menerima sentuhan. */}
+        <View style={styles.cameraContainer}>
           {cameraDevice && (
             <FaceDetectorCamera
               style={styles.camera}
@@ -1004,7 +1010,13 @@ export default function LKHScreen() {
               minFaceSize={FACE_DETECTOR_OPTIONS.minFaceSize}
             />
           )}
-          <View style={styles.cameraControls} pointerEvents="box-none">
+          <View
+            style={[
+              styles.cameraControls,
+              { paddingTop: insets.top + 20, paddingBottom: insets.bottom + 20 },
+            ]}
+            pointerEvents="box-none"
+          >
             <TouchableOpacity
               style={styles.closeBtn}
               onPress={() => {
@@ -1084,7 +1096,7 @@ export default function LKHScreen() {
               </TouchableOpacity>
             </View>
           )}
-        </SafeAreaView>
+        </View>
       </Modal>
 
       {/* Modal pendaftaran wajah (enrollment terpisah). Sengaja sebagai
@@ -1368,7 +1380,7 @@ const styles = StyleSheet.create({
   cameraControls: {
     ...StyleSheet.absoluteFillObject,
     justifyContent: "space-between",
-    padding: 20,
+    paddingHorizontal: 20,
   },
   closeBtn: {
     alignSelf: "flex-end",

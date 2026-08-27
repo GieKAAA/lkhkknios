@@ -6,7 +6,6 @@ import {
   Alert,
   Image,
   Modal,
-  SafeAreaView,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -19,6 +18,7 @@ import {
   usePhotoOutput,
 } from "react-native-vision-camera";
 import { Camera as FaceDetectorCamera } from "react-native-vision-camera-face-detector";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   ENROLLMENT_CONSISTENCY_MIN,
   faceSimilarity,
@@ -69,6 +69,7 @@ export default function FaceEnrollmentModal({
   const { hasPermission, requestPermission } = useCameraPermission();
   const cameraDevice = useCameraDevice("front");
   const qualityGate = useFaceQualityGate();
+  const insets = useSafeAreaInsets();
   // Resolusi sama dengan kamera absensi (LKHScreen) - alasan yang sama:
   // rasio 9:16 mendekati bentuk preview, dan jauh melampaui input
   // MobileFaceNet yang cuma 112x112.
@@ -177,7 +178,7 @@ export default function FaceEnrollmentModal({
 
   return (
     <Modal visible={visible} animationType="slide">
-      <SafeAreaView style={styles.container}>
+      <View style={styles.container}>
         {hasPermission && cameraDevice ? (
           <FaceDetectorCamera
             style={styles.camera}
@@ -211,15 +212,19 @@ export default function FaceEnrollmentModal({
           </View>
         )}
 
-        {/* BUGFIX: header sengaja dirender SETELAH <FaceDetectorCamera>.
-            Sebelumnya ia ada di atas kamera dalam urutan JSX dan hanya
-            mengandalkan zIndex:10 - tapi preview kamera adalah view NATIVE
-            yang menimpa urutan itu, sehingga tombol X tidak pernah menerima
-            sentuhan. LKHScreen sudah memakai urutan ini (kontrol setelah
-            kamera) dan tombol closenya berfungsi; disamakan ke sana.
-            pointerEvents="box-none" supaya area kosong header tidak ikut
-            menelan sentuhan yang ditujukan ke kamera/tombol lain. */}
-        <View style={styles.header} pointerEvents="box-none">
+        {/* Header dirender SETELAH kamera supaya tergambar di atasnya, dan
+            digeser turun sebesar safe area yang SEBENARNYA.
+            BUGFIX: dulu `top: 0` + `paddingTop: 8` menaruh tombol X pada 8pt
+            dari puncak layar - di dalam area status bar / Dynamic Island yang
+            dimiliki sistem (safe area atas iPhone ber-Dynamic Island ~59pt).
+            Akibatnya tombol X tidak pernah menerima sentuhan DAN judulnya
+            tertutup Dynamic Island. Container sengaja View polos, bukan
+            SafeAreaView, supaya inset hanya diterapkan di satu tempat - dua
+            sumber padding pernah membuat perilakunya tidak bisa ditebak. */}
+        <View
+          style={[styles.header, { paddingTop: insets.top + 8 }]}
+          pointerEvents="box-none"
+        >
           <TouchableOpacity
             style={styles.closeBtn}
             onPress={onClose}
@@ -238,7 +243,10 @@ export default function FaceEnrollmentModal({
           </View>
         </View>
 
-        <View style={styles.bottomArea} pointerEvents="box-none">
+        <View
+          style={[styles.bottomArea, { paddingBottom: insets.bottom + 24 }]}
+          pointerEvents="box-none"
+        >
           <BlurView intensity={50} tint="dark" style={styles.statusPill}>
             <Text style={styles.statusText}>{qualityGate.message}</Text>
           </BlurView>
@@ -300,7 +308,7 @@ export default function FaceEnrollmentModal({
             <Text style={styles.processingText}>Memproses wajah...</Text>
           </View>
         )}
-      </SafeAreaView>
+      </View>
     </Modal>
   );
 }
@@ -321,7 +329,6 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: 16,
-    paddingTop: 8,
   },
   closeBtn: {
     width: 44,
@@ -379,7 +386,6 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     alignItems: "center",
-    paddingBottom: 24,
   },
   statusPill: {
     overflow: "hidden",
