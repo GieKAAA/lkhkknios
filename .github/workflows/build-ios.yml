@@ -43,7 +43,17 @@ jobs:
 
       - name: Archive (unsigned)
         run: |
-          WORKSPACE=$(ls ios/*.xcworkspace | head -1)
+          # BUGFIX: `-d` is load-bearing. An .xcworkspace is a DIRECTORY, and
+          # `ls` on a directory lists its contents instead of printing the
+          # path - so a bare `ls ios/*.xcworkspace` resolved to
+          # "contents.xcworkspacedata" (the file inside it), and xcodebuild
+          # died with "'contents.xcworkspacedata' does not exist" / exit 66.
+          WORKSPACE=$(ls -d ios/*.xcworkspace 2>/dev/null | head -1)
+          if [ -z "$WORKSPACE" ]; then
+            echo "::error::Tidak ada .xcworkspace di ios/ - prebuild gagal?" >&2
+            ls -la ios 2>/dev/null >&2 || echo "folder ios/ tidak ada" >&2
+            exit 1
+          fi
           SCHEME=$(basename "$WORKSPACE" .xcworkspace)
           echo "Workspace: $WORKSPACE | Scheme: $SCHEME"
           xcodebuild \
@@ -57,7 +67,12 @@ jobs:
 
       - name: Package unsigned IPA
         run: |
-          APP_PATH=$(find build/App.xcarchive/Products/Applications -maxdepth 1 -type d -name '*.app' | head -1)
+          APP_PATH=$(find build/App.xcarchive/Products/Applications -maxdepth 1 -type d -name '*.app' 2>/dev/null | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::Tidak ada .app di dalam arsip - archive gagal?" >&2
+            find build/App.xcarchive -maxdepth 3 >&2 2>/dev/null || true
+            exit 1
+          fi
           echo "App bundle: $APP_PATH"
           STAGE="$RUNNER_TEMP/PayloadStage"
           rm -rf "$STAGE" && mkdir -p "$STAGE/Payload"
