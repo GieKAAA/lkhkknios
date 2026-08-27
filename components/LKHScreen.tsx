@@ -41,7 +41,12 @@ import {
     MAX_DISTANCE_KM,
     resolvePoskoLocation,
 } from "../utils/geofence";
-import { getDeviceInfoStr, APP_VERSION, API_USER_AGENT } from "../utils/deviceInfo";
+import { APP_VERSION, API_USER_AGENT, getDeviceInfoStr } from "../utils/deviceInfo";
+import {
+    downloadProfilePhoto,
+    profilePhotoHeaders,
+    profilePhotoUrl,
+} from "../utils/api";
 import { isDemoModeActive } from "../utils/demoMode";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -76,6 +81,21 @@ interface UserData {
   angkatanTanggalSelesai: string | null;
   settingTanggalMulai: string | null;
   settingTanggalSelesai: string | null;
+}
+
+/**
+ * Kunci tanggal "YYYY-MM-DD" menurut zona waktu PERANGKAT.
+ *
+ * toISOString() sendiri selalu memakai UTC, jadi di WITA (UTC+8) tanggal
+ * sebelum pukul 08:00 akan mundur satu hari. Menggeser dulu sebesar offset
+ * zona waktu membuat hasilnya mengikuti tanggal yang dilihat pengguna.
+ * Idiom ini sebelumnya disalin di delapan tempat pada file ini - satu saja
+ * yang lupa digeser sudah cukup membuat absen tercatat di tanggal yang salah.
+ */
+function toDateKey(date: Date): string {
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000)
+    .toISOString()
+    .split("T")[0];
 }
 
 function generateLocalRecordCode(): string {
@@ -196,12 +216,9 @@ export default function LKHScreen() {
   // Jadwalkan ulang notifikasi pengingat absen (10:00 & 20:00) setiap kali
   // data laporan berubah - otomatis dibatalkan begitu hari ini sudah absen.
   useEffect(() => {
-    const today = new Date();
-    const localToday = new Date(
-      today.getTime() - today.getTimezoneOffset() * 60000,
+    scheduleDailyAttendanceReminders(!!records[toDateKey(new Date())]).catch(
+      () => {},
     );
-    const todayStr = localToday.toISOString().split("T")[0];
-    scheduleDailyAttendanceReminders(!!records[todayStr]).catch(() => {});
   }, [records]);
 
   const loadUserProfile = async () => {
@@ -215,8 +232,7 @@ export default function LKHScreen() {
         const data = JSON.parse(profileJson);
         const fotoName = data.foto || "274131.jpg";
 
-        // PERBAIKAN: Menambahkan device_info pada URL Foto agar tidak ditolak server
-        const dbFotoUrl = `https://lkh-kkn.uin-alauddin.ac.id/api/profil-peserta?profil=${fotoName}&device_info=${getDeviceInfoStr()}&version=${APP_VERSION}`;
+        const dbFotoUrl = profilePhotoUrl(fotoName);
 
         setUserData({
           nama: data.nama,
@@ -243,21 +259,12 @@ export default function LKHScreen() {
 
   const downloadProfileFromDB = async (url: string, authToken: string) => {
     try {
-      const localUri = FileSystem.documentDirectory + "lkh_profile_db.jpg";
-      const { uri, status } = await FileSystem.downloadAsync(url, localUri, {
-        headers: {
-          Authorization: `Bearer ${authToken}`,
-          "User-Agent": API_USER_AGENT,
-          "Accept-Encoding": "gzip",
-        },
-      });
-
-      if (status === 200) {
-        setUserData((prev) => ({
-          ...prev,
-          fotoUrl: uri,
-        }));
-      }
+      const uri = await downloadProfilePhoto(
+        url,
+        authToken,
+        "lkh_profile_db.jpg",
+      );
+      if (uri) setUserData((prev) => ({ ...prev, fotoUrl: uri }));
     } catch (error) {
       console.error("Gagal mengunduh foto database", error);
     }
@@ -368,16 +375,8 @@ export default function LKHScreen() {
       day,
     );
 
-    const localDate = new Date(
-      selectedDate.getTime() - selectedDate.getTimezoneOffset() * 60000,
-    );
-    const dateStr = localDate.toISOString().split("T")[0];
-
-    const today = new Date();
-    const localToday = new Date(
-      today.getTime() - today.getTimezoneOffset() * 60000,
-    );
-    const todayStr = localToday.toISOString().split("T")[0];
+    const dateStr = toDateKey(selectedDate);
+    const todayStr = toDateKey(new Date());
 
     if (!isWithinKKNPeriod(selectedDate)) {
       Alert.alert("Perhatian", "Tanggal ini bukan dalam periode aktif KKN.");
@@ -494,11 +493,7 @@ export default function LKHScreen() {
   };
 
   const persistAttendance = async (photoUri: string) => {
-    const today = new Date();
-    const localToday = new Date(
-      today.getTime() - today.getTimezoneOffset() * 60000,
-    );
-    const todayStr = localToday.toISOString().split("T")[0];
+    const todayStr = toDateKey(new Date());
 
     const dir = FileSystem.documentDirectory || "";
     const newUri = `${dir}lkh_${todayStr}.jpg`;
@@ -736,30 +731,14 @@ export default function LKHScreen() {
     const firstDay = new Date(year, month, 1).getDay();
     const daysInMonth = new Date(year, month + 1, 0).getDate();
 
-    const today = new Date();
-    const localToday = new Date(
-      today.getTime() - today.getTimezoneOffset() * 60000,
-    );
-    const todayStr = localToday.toISOString().split("T")[0];
+    const todayStr = toDateKey(new Date());
 
     // null kalau server belum kasih tanggal periode sama sekali (lihat
     // kknPeriod) - dalam kondisi itu, tanggal kosong tidak ditandai merah
     // sama sekali (kita tidak tahu apa tanggal itu "harusnya diisi" atau
     // bukan), daripada menebak pakai rentang yang salah.
-    const kknStartStr = kknPeriod.start
-      ? new Date(
-          kknPeriod.start.getTime() - kknPeriod.start.getTimezoneOffset() * 60000,
-        )
-          .toISOString()
-          .split("T")[0]
-      : null;
-    const kknEndStr = kknPeriod.end
-      ? new Date(
-          kknPeriod.end.getTime() - kknPeriod.end.getTimezoneOffset() * 60000,
-        )
-          .toISOString()
-          .split("T")[0]
-      : null;
+    const kknStartStr = kknPeriod.start ? toDateKey(kknPeriod.start) : null;
+    const kknEndStr = kknPeriod.end ? toDateKey(kknPeriod.end) : null;
 
     const days = [];
     for (let i = 0; i < firstDay; i++) {
@@ -767,11 +746,7 @@ export default function LKHScreen() {
     }
 
     for (let day = 1; day <= daysInMonth; day++) {
-      const date = new Date(year, month, day);
-      const localDate = new Date(
-        date.getTime() - date.getTimezoneOffset() * 60000,
-      );
-      const dateStr = localDate.toISOString().split("T")[0];
+      const dateStr = toDateKey(new Date(year, month, day));
 
       const record = records[dateStr];
       let bgStyle = styles.statusNone;
@@ -829,12 +804,7 @@ export default function LKHScreen() {
                 // abu-abu (backgroundColor di bawah). User-Agent juga wajib:
                 // Cloudflare WAF memblokir request non-Dart sebelum sampai
                 // server (lihat utils/deviceInfo.ts).
-                headers: token
-                  ? {
-                      Authorization: `Bearer ${token}`,
-                      "User-Agent": API_USER_AGENT,
-                    }
-                  : { "User-Agent": API_USER_AGENT },
+                headers: profilePhotoHeaders(token),
               }}
               style={styles.profileImage}
               defaultSource={{

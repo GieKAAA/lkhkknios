@@ -175,8 +175,8 @@ const LEGACY_KEYS = ["@face_reference_embedding", "@face_reference_photo"];
 export class NoFaceDetectedError extends Error {}
 export class MultipleFacesDetectedError extends Error {}
 export class PoorQualityFaceError extends Error {}
-export class FaceModelNotReadyError extends Error {}
-export class FaceEmbeddingInvalidError extends Error {}
+class FaceModelNotReadyError extends Error {}
+class FaceEmbeddingInvalidError extends Error {}
 
 let legacyCleanupDone = false;
 async function cleanupLegacyKeysOnce(): Promise<void> {
@@ -712,7 +712,7 @@ export const FACE_MATCH_THRESHOLD = 0.47;
 // enrollment prompts ask for.
 export const ENROLLMENT_CONSISTENCY_MIN = 0.45;
 
-export const CALIBRATION_LOG_KEY = "@face_calibration_log";
+const CALIBRATION_LOG_KEY = "@face_calibration_log";
 const MAX_CALIBRATION_LOG_ENTRIES = 200;
 
 /**
@@ -745,6 +745,3 @@ export async function getCalibrationLog(): Promise<
   return raw ? JSON.parse(raw) : [];
 }
 
-export async function clearCalibrationLog(): Promise<void> {
-  await AsyncStorage.removeItem(CALIBRATION_LOG_KEY);
-}

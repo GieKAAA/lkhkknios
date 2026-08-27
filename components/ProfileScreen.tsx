@@ -1,6 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import * as FileSystem from "expo-file-system/legacy";
 import { BlurView } from "expo-blur";
 import React, { useEffect, useState } from "react";
 import {
@@ -21,7 +20,11 @@ import {
     resetEnrollment,
     type ResetQuota,
 } from "../utils/faceEnrollment";
-import { getDeviceInfoStr, APP_VERSION, API_USER_AGENT } from "../utils/deviceInfo";
+import {
+    downloadProfilePhoto,
+    profilePhotoHeaders,
+    profilePhotoUrl,
+} from "../utils/api";
 import { isDemoModeActive, setDemoMode } from "../utils/demoMode";
 import Constants from "expo-constants";
 
@@ -112,8 +115,7 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
         const data = JSON.parse(profileJson);
         const fotoName = data.foto || "274131.jpg";
 
-        // PERBAIKAN: Menambahkan device_info
-        const dbFotoUrl = `https://lkh-kkn.uin-alauddin.ac.id/api/profil-peserta?profil=${fotoName}&device_info=${getDeviceInfoStr()}&version=${APP_VERSION}`;
+        const dbFotoUrl = profilePhotoUrl(fotoName);
 
         setProfileData({
           nim: data.nim,
@@ -139,21 +141,8 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
 
   const downloadProfileFromDB = async (url: string, authToken: string) => {
     try {
-      const localUri = FileSystem.documentDirectory + "profile_db.jpg";
-      const { uri, status } = await FileSystem.downloadAsync(url, localUri, {
-        headers: {
-          Authorization: `Bearer ${authToken}`,
-          "User-Agent": API_USER_AGENT,
-          "Accept-Encoding": "gzip",
-        },
-      });
-
-      if (status === 200) {
-        setProfileData((prev) => ({
-          ...prev,
-          serverFotoUrl: uri,
-        }));
-      }
+      const uri = await downloadProfilePhoto(url, authToken, "profile_db.jpg");
+      if (uri) setProfileData((prev) => ({ ...prev, serverFotoUrl: uri }));
     } catch (error) {
       console.error("Gagal mengunduh foto dari database", error);
     }
@@ -240,12 +229,7 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
                 // diam-diam dan foto jatuh ke placeholder abu-abu.
                 // User-Agent wajib: Cloudflare WAF memblokir request
                 // non-Dart (lihat utils/deviceInfo.ts).
-                headers: token
-                  ? {
-                      Authorization: `Bearer ${token}`,
-                      "User-Agent": API_USER_AGENT,
-                    }
-                  : { "User-Agent": API_USER_AGENT },
+                headers: profilePhotoHeaders(token),
               }}
               style={styles.avatarImage}
               defaultSource={{
@@ -324,14 +308,15 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
                   // benar berakhir saat logout dan login asli berikutnya tidak
                   // diam-diam masih membypass gerbang periode/geofence.
                   await AsyncStorage.removeItem("@demo_mode");
-                  // BUGFIX: used to also call clearAllFaceData() here,
-                  // wiping the reference face on every logout - this app is
-                  // used on the student's own personal device (see
-                  // PANDUAN-BUILD-IPA.md / KSign sideload flow), not shared
-                  // between accounts, so there was no real "account switch"
-                  // this was protecting against - it just forced a
-                  // re-enroll on every login, which is worse for
-                  // anti-titip-absen than keeping the original reference.
+                  // Logout SENGAJA tidak menghapus wajah terdaftar.
+                  // Aplikasi ini dipakai di perangkat pribadi mahasiswa
+                  // sendiri (lihat PANDUAN-BUILD-IPA.md / alur sideload
+                  // KSign), bukan perangkat bersama, jadi tidak ada
+                  // "pergantian akun" yang perlu dilindungi - menghapusnya
+                  // hanya memaksa daftar ulang tiap login, yang justru lebih
+                  // buruk untuk anti-titip-absen. Sesi demo memakai
+                  // namespace terpisah (lihat storageKeys di
+                  // utils/faceEnrollment.ts), jadi tidak ikut terbawa.
                   onLogout();
                 },
               },

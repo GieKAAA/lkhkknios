@@ -1,3 +1,4 @@
+import * as FileSystem from "expo-file-system/legacy";
 import { API_USER_AGENT, APP_VERSION, getDeviceInfoStr } from "./deviceInfo";
 
 /**
@@ -15,10 +16,10 @@ import { API_USER_AGENT, APP_VERSION, getDeviceInfoStr } from "./deviceInfo";
  * Modul ini tidak mengubah perilaku apa pun, hanya menyatukan aturannya.
  */
 
-export const API_BASE = "https://lkh-kkn.uin-alauddin.ac.id";
+const API_BASE = "https://lkh-kkn.uin-alauddin.ac.id";
 
 /** Server membalas HTML, bukan JSON - token kadaluarsa atau diblokir WAF. */
-export class SessionExpiredError extends Error {}
+class SessionExpiredError extends Error {}
 
 /** Server menjawab dengan benar tapi menolak permintaannya. */
 export class ApiError extends Error {
@@ -116,6 +117,44 @@ export async function apiGet<T>(
  * scripts/login-probe2.ps1: hipotesis JSON sudah diuji dan tidak membuat
  * server berperilaku beda.
  */
+/* ------------------------------------------------------------------ *
+ * Foto profil peserta
+ *
+ * Ketiganya dipakai IDENTIK oleh LKHScreen dan ProfileScreen. Sebelumnya
+ * disalin utuh di kedua layar, termasuk header Bearer + User-Agent Dart yang
+ * kalau terlewat membuat foto gagal diam-diam dan jatuh ke placeholder abu-
+ * abu (lihat catatan di deviceInfo.ts).
+ * ------------------------------------------------------------------ */
+
+export function profilePhotoUrl(fotoName: string): string {
+  return `${API_BASE}/api/profil-peserta?profil=${fotoName}&device_info=${getDeviceInfoStr()}&version=${APP_VERSION}`;
+}
+
+/**
+ * Header untuk <Image source={{ uri, headers }}>. Selama foto belum
+ * terunduh ke lokal, URI-nya masih menunjuk endpoint yang butuh token -
+ * tanpa header ini request-nya gagal tanpa pesan.
+ */
+export function profilePhotoHeaders(token: string): Record<string, string> {
+  return token
+    ? { Authorization: `Bearer ${token}`, "User-Agent": API_USER_AGENT }
+    : { "User-Agent": API_USER_AGENT };
+}
+
+/** Unduh ke berkas lokal; null kalau server tidak menjawab 200. */
+export async function downloadProfilePhoto(
+  url: string,
+  token: string,
+  fileName: string,
+): Promise<string | null> {
+  const { uri, status } = await FileSystem.downloadAsync(
+    url,
+    FileSystem.documentDirectory + fileName,
+    { headers: { ...profilePhotoHeaders(token), "Accept-Encoding": "gzip" } },
+  );
+  return status === 200 ? uri : null;
+}
+
 export async function apiPostForm<T>(
   path: string,
   token: string,

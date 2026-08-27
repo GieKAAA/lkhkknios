@@ -37,7 +37,7 @@ export const DEMO_TOKEN = "demo-token-lokal";
  * Dummy profile shown on LKH/Profile screens during a demo session. Fields
  * mirror the shape LoginScreen stores after a real /api/peserta response.
  */
-export const DEMO_PROFILE = {
+const DEMO_PROFILE = {
   nim: "DEMO",
   nama: "Peserta Demo",
   foto: "",
