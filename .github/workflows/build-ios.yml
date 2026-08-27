@@ -1,7 +1,9 @@
 # Build iOS IPA tanpa Mac lokal.
 #
 # Jalankan manual dari tab Actions ("Build iOS IPA" -> Run workflow), lalu
-# unduh artifact "lkh-kkn-ios-ipa-unsigned" di halaman run.
+# unduh artifact di halaman run. Namanya memuat versi dan nomor build,
+# misalnya "lkh-kkn-ios-v1.0.0-build7" - nomor build yang lebih besar selalu
+# lebih baru.
 #
 # Catatan penting:
 # - Hasilnya IPA *unsigned* (tanpa sertifikat Apple, karena signing butuh
@@ -75,6 +77,26 @@ jobs:
       - name: Install dependencies
         run: npm install --legacy-peer-deps
 
+      # Tiap run mendapat nomor build sendiri supaya dua IPA tidak pernah
+      # tampak identik. github.run_number naik terus dan tidak pernah
+      # terulang, jadi IPA yang lebih besar nomornya SELALU yang lebih baru -
+      # itulah gunanya CFBundleVersion di iOS.
+      #
+      # CATATAN: ini versi APLIKASI, bukan APP_VERSION di utils/deviceInfo.ts.
+      # Yang di deviceInfo.ts dikirim ke server LKH sebagai `version=...` dan
+      # sengaja meniru versi aplikasi Flutter resmi supaya tidak ditolak
+      # gerbang versi di server - jangan pernah menaikkannya di sini.
+      - name: Setel nomor build unik
+        run: |
+          node -e 'const fs=require("fs");
+            const cfg=JSON.parse(fs.readFileSync("app.json","utf8"));
+            cfg.expo.ios=cfg.expo.ios||{};
+            cfg.expo.ios.buildNumber=process.env.GITHUB_RUN_NUMBER;
+            fs.writeFileSync("app.json",JSON.stringify(cfg,null,2)+"\n");'
+          VERSION=$(node -p 'require("./app.json").expo.version')
+          echo "IPA_NAME=lkh-kkn-ios-v$VERSION-build$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+          echo "Versi aplikasi $VERSION, nomor build $GITHUB_RUN_NUMBER"
+
       - name: Generate native iOS project (prebuild + pod install)
         env:
           CI: "1"
@@ -117,10 +139,13 @@ jobs:
           rm -rf "$STAGE" && mkdir -p "$STAGE/Payload"
           cp -R "$APP_PATH" "$STAGE/Payload/"
           cd "$STAGE"
-          zip -qry "$GITHUB_WORKSPACE/lkh-kkn-ios-unsigned.ipa" Payload
+          zip -qry "$GITHUB_WORKSPACE/$IPA_NAME.ipa" Payload
+          echo "IPA: $IPA_NAME.ipa"
 
+      # Nama artifact ikut memuat versi + nomor build, jadi di halaman
+      # Actions terlihat langsung mana yang terbaru tanpa harus membuka run.
       - uses: actions/upload-artifact@v4
         with:
-          name: lkh-kkn-ios-ipa-unsigned
-          path: lkh-kkn-ios-unsigned.ipa
+          name: ${{ env.IPA_NAME }}
+          path: ${{ env.IPA_NAME }}.ipa
           retention-days: 14

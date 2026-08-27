@@ -22,6 +22,7 @@ import {
 } from "../utils/faceEnrollment";
 import { getDeviceInfoStr, APP_VERSION, API_USER_AGENT } from "../utils/deviceInfo";
 import { isDemoModeActive, setDemoMode } from "../utils/demoMode";
+import Constants from "expo-constants";
 
 interface ProfileScreenProps {
   onLogout: () => void;
@@ -381,6 +382,18 @@ export default function ProfileScreen({ onLogout }: ProfileScreenProps) {
           />
           <Text style={styles.demoButtonText}>Lihat Log Kemiripan Wajah</Text>
         </TouchableOpacity>
+
+        {/* Aplikasi ini dipasang lewat sideload, sering beberapa build
+            berturut-turut dalam sehari - tanpa ini tidak ada cara memastikan
+            build mana yang benar-benar terpasang saat menguji perbaikan.
+            Nomor build diisi otomatis dari nomor run GitHub Actions (lihat
+            .github/workflows/build-ios.yml), jadi angka lebih besar = lebih
+            baru. Ini versi APLIKASI, bukan APP_VERSION yang dikirim ke server
+            di utils/deviceInfo.ts. */}
+        <Text style={styles.versionText}>
+          Versi {Constants.expoConfig?.version ?? "?"} (build{" "}
+          {Constants.expoConfig?.ios?.buildNumber ?? "?"})
+        </Text>
       </ScrollView>
     </SafeAreaView>
   );
@@ -522,6 +535,12 @@ const styles = StyleSheet.create({
   demoButtonActive: {
     backgroundColor: "#B8860B",
     borderColor: "#B8860B",
+  },
+  versionText: {
+    textAlign: "center",
+    color: "#8E8E93",
+    fontSize: 12,
+    marginTop: 18,
   },
   demoButtonText: {
     color: TEXT_SECONDARY,

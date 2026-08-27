@@ -14,7 +14,8 @@
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSCameraUsageDescription": "Aplikasi butuh akses kamera untuk mengambil foto selfie absensi."
-      }
+      },
+      "buildNumber": "1"
     },
     "android": {
       "adaptiveIcon": {
