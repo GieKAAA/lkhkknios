@@ -149,11 +149,22 @@ export default function FaceEnrollmentModal({
     if (!canFinish) return;
     setIsProcessingFace(true);
     try {
-      await saveEnrollment(
+      const outcome = await saveEnrollment(
         captures.map((c) => c.embedding),
         captures.map((c) => c.photoUri),
       );
       onComplete();
+      // Wajah terdaftar disimpan di server (lihat utils/faceEnrollment.ts).
+      // Kalau kiriman gagal, enrollment TIDAK dibatalkan - sudah tersimpan
+      // lokal dan absen bisa langsung jalan - tapi pengguna perlu tahu
+      // datanya belum aman di server supaya tidak kaget kalau hilang saat
+      // ganti perangkat.
+      if (outcome === "pending") {
+        Alert.alert(
+          "Tersimpan di Perangkat",
+          "Wajah Anda sudah terdaftar dan bisa langsung dipakai absen. Namun data belum terkirim ke server (koneksi bermasalah atau sesi kadaluarsa) - akan dikirim otomatis saat aplikasi dibuka kembali dengan koneksi yang baik.",
+        );
+      }
     } catch (error) {
       console.error("Gagal menyimpan enrollment wajah", error);
       Alert.alert(

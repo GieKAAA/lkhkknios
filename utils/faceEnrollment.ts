@@ -1,31 +1,44 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { CALIBRATION_LOG_KEY, faceSimilarity } from "./faceAuthNative";
+import {
+  fetchServerEnrollment,
+  fetchServerResetInfo,
+  pushServerEnrollment,
+  requestServerReset,
+} from "./faceServer";
 
 /**
- * Storage & verification layer for the SEPARATE enrollment flow (replaces
- * the old silent "first attendance photo becomes the reference" behavior
- * that used to live in LKHScreen.takeSelfie).
+ * Penyimpanan & verifikasi untuk alur enrollment terpisah
+ * (components/FaceEnrollmentModal.tsx). Modul ini hanya mengurus
+ * persistensi + perbandingan + migrasi; ia mengimpor dari faceAuthNative,
+ * tidak pernah sebaliknya, supaya pipeline tetap bisa diuji tanpa storage.
  *
- * Enrollment now happens up front in components/FaceEnrollmentModal.tsx:
- * the user captures 3-5 selfies (each one forced through the exact same
- * getFaceEmbedding() pipeline as verification - see module doc comment in
- * faceAuthNative.ts), and ALL of their embeddings are stored. Verification
- * compares a probe against every enrolled embedding and takes the HIGHEST
- * similarity (bestSimilarityToEnrollment below) - multiple captures cover
- * pose/expression/lighting variation, so genuine matches survive conditions
- * a single reference would miss.
+ * MODEL PENYIMPANAN - SERVER SUMBER KEBENARAN, LOKAL SEBAGAI CACHE.
+ * Ini mengikuti aplikasi Android resmi, yang menyimpan wajah terdaftar di
+ * server lewat /api/simpan-face-data dan membacanya lewat /api/face-data
+ * (lihat utils/faceServer.ts untuk asal pengetahuan itu). Sebelumnya port
+ * iOS ini murni lokal, yang berarti wajah terdaftar hilang saat ganti atau
+ * instal ulang perangkat, dan jatah reset bisa diakali cukup dengan
+ * membersihkan data aplikasi.
  *
- * This module owns ONLY persistence + comparison + migration. It never
- * touches the camera or the model - it imports from faceAuthNative (never
- * the other way around), so the pipeline stays testable without storage.
+ * Lokal tidak dibuang, hanya turun pangkat jadi cache. Alasannya wajib:
+ * absen harus tetap jalan tanpa internet di posko, dan akun KKN yang
+ * periodenya sudah lewat tidak bisa lagi menghubungi server sama sekali
+ * (lihat utils/demoMode.ts). Aturannya:
  *
- * Storage shape ("@face_enrollment_v3", JSON):
- *   {
- *     version: 3,
- *     createdAt: number,          // epoch ms
- *     embeddings: number[][]      // 3-5 arrays of 192 floats
- *     photos: string[]            // file:// URIs of the capture photos
- *   }
+ *   - Server terbaca berisi  -> cache lokal ditimpa isi server.
+ *   - Server terbaca kosong  -> data lokal justru DIKIRIM ke server
+ *                               (self-healing; kita satu-satunya penulis).
+ *   - Server tak terjangkau  -> pakai cache lokal apa adanya. JANGAN pernah
+ *                               menganggapnya "belum terdaftar", karena itu
+ *                               memaksa daftar ulang tiap internet mati.
+ *
+ * Enrollment yang belum sempat terkirim ditandai PENDING_PUSH_KEY dan dicoba
+ * lagi tiap syncEnrollmentFromServer() jalan - pola yang sama dengan laporan
+ * LKH berstatus "unsynced" di LKHScreen.
+ *
+ * Bentuk cache lokal ("@face_enrollment_v3", JSON):
+ *   { version: 3, createdAt: number, embeddings: number[][], photos: string[] }
  */
 
 export const MIN_ENROLLMENT_PHOTOS = 3;
@@ -33,16 +46,17 @@ export const MAX_ENROLLMENT_PHOTOS = 5;
 
 const ENROLLMENT_KEY = "@face_enrollment_v3";
 
-// Deliberately the SAME key the old single-reference pipeline used for its
-// reset budget (was RESET_COUNT_KEY in faceAuthNative.ts) - users who already
-// spent some of their MAX_FACE_RESETS keep exactly that remaining budget
-// instead of getting a fresh allowance when this flow ships.
+// Sengaja memakai key yang SAMA dengan pipeline referensi-tunggal lama, agar
+// pengguna yang sudah memakai sebagian jatah resetnya tidak dapat jatah baru.
+// Sejak jatah reset diambil dari server, nilai ini turun peran jadi cadangan
+// saat server tidak terjangkau.
 const RESET_COUNT_KEY = "@face_reference_reset_count";
 export const MAX_FACE_RESETS = 3;
 
-// v2 single-embedding keys (written by saveReferenceEmbedding in the old
-// pipeline). Migrated once into v3 by migrateLegacyV2Once, then removed so
-// they can never shadow or split state again.
+const PENDING_PUSH_KEY = "@face_enrollment_pending_push";
+
+// Key v2 (satu embedding) dari pipeline lama. Dimigrasi sekali ke v3 lalu
+// dihapus supaya tidak pernah bisa membayangi atau memecah state lagi.
 const LEGACY_EMBEDDING_KEY = "@face_reference_embedding_v2";
 const LEGACY_PHOTO_KEY = "@face_reference_photo_v2";
 
@@ -53,47 +67,16 @@ interface StoredEnrollment {
   photos: string[];
 }
 
+export type SyncOutcome = "updated" | "pushed" | "pending" | "unavailable";
+
 let migrationDone = false;
 
-/**
- * Soft migration (design decision: NOT force-re-enroll): an install that
- * still has the old single-embedding reference gets it wrapped as a
- * one-element v3 set. max-of-1 is numerically identical to the old
- * comparison, so migrated users keep working seamlessly mid-KKN - they can
- * optionally complete a full multi-photo enrollment later. Idempotent,
- * runs at most once per app session, and wipes the legacy keys either way
- * so a corrupt value can't linger.
- */
-async function migrateLegacyV2Once(): Promise<void> {
-  if (migrationDone) return;
-  try {
-    const raw = await AsyncStorage.getItem(LEGACY_EMBEDDING_KEY);
-    if (raw) {
-      const parsed: unknown = JSON.parse(raw);
-      const usable =
-        Array.isArray(parsed) &&
-        parsed.length > 0 &&
-        parsed.every((v) => typeof v === "number" && Number.isFinite(v));
-      if (
-        usable &&
-        parseEnrollment(await AsyncStorage.getItem(ENROLLMENT_KEY)) === null
-      ) {
-        const photoUri = await AsyncStorage.getItem(LEGACY_PHOTO_KEY);
-        const enrollment: StoredEnrollment = {
-          version: 3,
-          createdAt: Date.now(),
-          embeddings: [parsed as number[]],
-          photos: photoUri ? [photoUri] : [],
-        };
-        await AsyncStorage.setItem(ENROLLMENT_KEY, JSON.stringify(enrollment));
-      }
-      await AsyncStorage.multiRemove([LEGACY_EMBEDDING_KEY, LEGACY_PHOTO_KEY]);
-    }
-  } catch {
-    // Best-effort only: a corrupt/unreadable legacy value just means that
-    // user enrolls fresh through the modal. Never block on migration.
-  }
-  migrationDone = true;
+async function getSession(): Promise<{ nim: string | null; token: string | null }> {
+  const [nim, token] = await Promise.all([
+    AsyncStorage.getItem("@user_nim"),
+    AsyncStorage.getItem("@user_token"),
+  ]);
+  return { nim, token };
 }
 
 function parseEnrollment(raw: string | null): StoredEnrollment | null {
@@ -116,90 +99,255 @@ function parseEnrollment(raw: string | null): StoredEnrollment | null {
   }
 }
 
-export async function isEnrolled(): Promise<boolean> {
-  await migrateLegacyV2Once();
-  return parseEnrollment(await AsyncStorage.getItem(ENROLLMENT_KEY)) !== null;
-}
-
-/** All enrolled embeddings, or null if the user hasn't enrolled (yet/anymore). */
-export async function getEnrollments(): Promise<Float32Array[] | null> {
-  await migrateLegacyV2Once();
-  const stored = parseEnrollment(await AsyncStorage.getItem(ENROLLMENT_KEY));
-  if (!stored) return null;
-  return stored.embeddings.map((e) => Float32Array.from(e));
-}
-
-export async function saveEnrollment(
-  embeddings: Float32Array[],
-  photoUris: string[],
+async function writeLocalEnrollment(
+  embeddings: number[][],
+  photos: string[],
 ): Promise<void> {
-  if (embeddings.length === 0) {
-    throw new Error("Tidak ada data wajah untuk disimpan.");
-  }
   const enrollment: StoredEnrollment = {
     version: 3,
     createdAt: Date.now(),
-    embeddings: embeddings.map((e) => Array.from(e)),
-    photos: photoUris,
+    embeddings,
+    photos,
   };
   await AsyncStorage.setItem(ENROLLMENT_KEY, JSON.stringify(enrollment));
 }
 
 /**
- * Highest cosine similarity between `query` and EVERY enrolled embedding -
- * the multi-reference replacement for the old single
- * faceSimilarity(reference, probe). Null when there is nothing enrolled:
- * callers must treat that as "not enrolled", not as score 0.
+ * Migrasi lunak (keputusan desain: BUKAN paksa daftar ulang): instalasi yang
+ * masih menyimpan referensi tunggal lama dibungkus jadi set v3 berisi satu
+ * elemen. max-of-1 identik secara numerik dengan perbandingan lama, jadi
+ * pengguna hasil migrasi tetap bisa absen di tengah periode KKN. Idempoten,
+ * jalan paling banyak sekali per sesi aplikasi.
  */
-export async function bestSimilarityToEnrollment(
+async function migrateLegacyV2Once(): Promise<void> {
+  if (migrationDone) return;
+  try {
+    const raw = await AsyncStorage.getItem(LEGACY_EMBEDDING_KEY);
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw);
+      const usable =
+        Array.isArray(parsed) &&
+        parsed.length > 0 &&
+        parsed.every((v) => typeof v === "number" && Number.isFinite(v));
+      if (
+        usable &&
+        parseEnrollment(await AsyncStorage.getItem(ENROLLMENT_KEY)) === null
+      ) {
+        const photoUri = await AsyncStorage.getItem(LEGACY_PHOTO_KEY);
+        await writeLocalEnrollment(
+          [parsed as number[]],
+          photoUri ? [photoUri] : [],
+        );
+        // Hasil migrasi belum pernah dikenal server - antrekan untuk dikirim.
+        await AsyncStorage.setItem(PENDING_PUSH_KEY, "1");
+      }
+      await AsyncStorage.multiRemove([LEGACY_EMBEDDING_KEY, LEGACY_PHOTO_KEY]);
+    }
+  } catch {
+    // Best-effort: nilai lama yang rusak berarti pengguna itu mendaftar ulang
+    // lewat modal. Jangan pernah memblokir karena migrasi.
+  }
+  migrationDone = true;
+}
+
+async function readLocalEnrollment(): Promise<StoredEnrollment | null> {
+  await migrateLegacyV2Once();
+  return parseEnrollment(await AsyncStorage.getItem(ENROLLMENT_KEY));
+}
+
+export async function isEnrolled(): Promise<boolean> {
+  return (await readLocalEnrollment()) !== null;
+}
+
+/** Semua embedding terdaftar, atau null kalau belum terdaftar. */
+export async function getEnrollments(): Promise<Float32Array[] | null> {
+  const stored = await readLocalEnrollment();
+  if (!stored) return null;
+  return stored.embeddings.map((e) => Float32Array.from(e));
+}
+
+/**
+ * Selaraskan cache lokal dengan server. Panggil saat aplikasi terbuka.
+ * Tidak pernah melempar - gagal jaringan adalah kondisi normal di sini, dan
+ * hasilnya cukup dilaporkan lewat nilai balik.
+ */
+export async function syncEnrollmentFromServer(): Promise<SyncOutcome> {
+  await migrateLegacyV2Once();
+  const { nim, token } = await getSession();
+
+  try {
+    const remote = await fetchServerEnrollment(nim, token);
+    if (remote) {
+      const local = await readLocalEnrollment();
+      await writeLocalEnrollment(remote, local?.photos ?? []);
+      await AsyncStorage.removeItem(PENDING_PUSH_KEY);
+      return "updated";
+    }
+    // Server terjangkau tapi belum punya wajah untuk akun ini. Kalau ada
+    // salinan lokal, kirim - jangan hapus lokalnya.
+    const local = await readLocalEnrollment();
+    if (local) {
+      await pushServerEnrollment(nim, token, local.embeddings);
+      await AsyncStorage.removeItem(PENDING_PUSH_KEY);
+      return "pushed";
+    }
+    return "updated";
+  } catch {
+    const local = await readLocalEnrollment();
+    if (local && (await AsyncStorage.getItem(PENDING_PUSH_KEY))) return "pending";
+    return "unavailable";
+  }
+}
+
+/**
+ * Simpan hasil enrollment: cache lokal dulu (supaya absen langsung bisa
+ * dipakai walau offline), baru dikirim ke server. Kegagalan kiriman tidak
+ * membatalkan enrollment - ditandai untuk dicoba lagi nanti.
+ */
+export async function saveEnrollment(
+  embeddings: Float32Array[],
+  photoUris: string[],
+): Promise<SyncOutcome> {
+  if (embeddings.length === 0) {
+    throw new Error("Tidak ada data wajah untuk disimpan.");
+  }
+  const plain = embeddings.map((e) => Array.from(e));
+  await writeLocalEnrollment(plain, photoUris);
+
+  const { nim, token } = await getSession();
+  try {
+    await pushServerEnrollment(nim, token, plain);
+    await AsyncStorage.removeItem(PENDING_PUSH_KEY);
+    return "pushed";
+  } catch {
+    await AsyncStorage.setItem(PENDING_PUSH_KEY, "1");
+    return "pending";
+  }
+}
+
+/**
+ * Kemiripan `query` terhadap set wajah terdaftar, sebagai satu angka.
+ * Null kalau belum ada yang terdaftar: pemanggil wajib memperlakukannya
+ * sebagai "belum terdaftar", bukan sebagai skor 0.
+ *
+ * MEDIAN, BUKAN MAKSIMUM - ini perbaikan inti untuk bug "wajah orang lain
+ * bisa absen". max-of-N memberi impostor N kesempatan menembus ambang, bukan
+ * satu: cukup SATU foto enrollment yang kebetulan berpose/berpencahayaan mirip
+ * untuk meloloskannya. Median menuntut kecocokan dengan MAYORITAS wajah
+ * terdaftar, sehingga satu kebetulan tidak lagi cukup.
+ *
+ * Diukur, bukan diasumsikan (tools/face-calibration, 2026-08-27) - jarak
+ * antara skor genuine terendah dan skor impostor tertinggi, dengan crop
+ * terkalibrasi:
+ *     enrollment 3 foto:  max +0.234  top2 +0.257  mean +0.245  median +0.279
+ *     enrollment 4 foto:  max +0.206  top2 +0.220  mean +0.235  median +0.257
+ *     enrollment 5 foto:  max +0.206  top2 +0.220  mean +0.215  median +0.279
+ * Median menang di ketiga ukuran enrollment, max kalah di ketiganya.
+ *
+ * TERIKAT PADA FINAL_CROP_RATIO: pada crop lama yang terlalu ketat (1.3),
+ * urutan ini justru TERBALIK - max yang menang, karena semua skor berdesakan
+ * sehingga median ikut tertarik ke bawah menembus ambang. Jadi median hanya
+ * benar bersama crop yang terkalibrasi. Kalau FINAL_CROP_RATIO diubah,
+ * ukur ulang keduanya bersamaan.
+ */
+export async function similarityToEnrollment(
   query: Float32Array | number[],
 ): Promise<number | null> {
   const enrolled = await getEnrollments();
   if (!enrolled || enrolled.length === 0) return null;
-  let best = -Infinity;
-  for (const reference of enrolled) {
-    const similarity = faceSimilarity(query, reference);
-    if (similarity > best) best = similarity;
-  }
-  return best;
+
+  const scores = enrolled
+    .map((reference) => faceSimilarity(query, reference))
+    .sort((a, b) => a - b);
+  const mid = scores.length >> 1;
+  return scores.length % 2 === 0
+    ? (scores[mid - 1] + scores[mid]) / 2
+    : scores[mid];
 }
 
 export async function clearEnrollment(): Promise<void> {
-  await AsyncStorage.removeItem(ENROLLMENT_KEY);
+  await AsyncStorage.multiRemove([ENROLLMENT_KEY, PENDING_PUSH_KEY]);
 }
 
-async function getFaceResetCount(): Promise<number> {
+async function getLocalResetCount(): Promise<number> {
   const raw = await AsyncStorage.getItem(RESET_COUNT_KEY);
   const parsed = raw ? parseInt(raw, 10) : 0;
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-export async function getRemainingFaceResets(): Promise<number> {
-  const count = await getFaceResetCount();
-  return Math.max(0, MAX_FACE_RESETS - count);
+export interface ResetQuota {
+  remaining: number;
+  max: number;
+  /** True kalau angkanya dari server; false kalau dari cadangan lokal. */
+  fromServer: boolean;
 }
 
 /**
- * Clears the WHOLE enrolled embedding set so the user must redo the full
- * 3-5 photo enrollment before attending again (unlike the old flow, there
- * is no fallback to "next photo becomes the reference" - enrollment only
- * ever happens through FaceEnrollmentModal now). Limited to MAX_FACE_RESETS
- * uses so it can't be used to repeatedly swap in someone else's face.
- * Returns false if the limit has already been reached (data is left
- * untouched in that case).
+ * Jatah reset. Server yang berwenang (app Android memakai /api/jumlah-reset
+ * dan /api/max-reset); hitungan lokal hanya dipakai saat server tidak
+ * terjangkau, dan ikut disegarkan tiap kali server berhasil dibaca.
+ */
+export async function getResetQuota(): Promise<ResetQuota> {
+  const { nim, token } = await getSession();
+  try {
+    const info = await fetchServerResetInfo(nim, token);
+    if (info) {
+      await AsyncStorage.setItem(RESET_COUNT_KEY, String(info.used));
+      return {
+        remaining: Math.max(0, info.max - info.used),
+        max: info.max,
+        fromServer: true,
+      };
+    }
+  } catch {
+    // jatuh ke cadangan lokal di bawah
+  }
+  return {
+    remaining: Math.max(0, MAX_FACE_RESETS - (await getLocalResetCount())),
+    max: MAX_FACE_RESETS,
+    fromServer: false,
+  };
+}
+
+export async function getRemainingFaceResets(): Promise<number> {
+  return (await getResetQuota()).remaining;
+}
+
+/**
+ * Hapus SELURUH set wajah terdaftar sehingga pengguna harus mengulang
+ * enrollment 3-5 foto sebelum bisa absen lagi. Dibatasi jatah reset supaya
+ * tidak bisa dipakai berulang untuk menukar wajah orang lain. Mengembalikan
+ * false kalau jatahnya sudah habis (data dibiarkan utuh).
  */
 export async function resetEnrollment(): Promise<boolean> {
-  const count = await getFaceResetCount();
+  const { nim, token } = await getSession();
+
+  try {
+    const info = await fetchServerResetInfo(nim, token);
+    if (info) {
+      if (info.used >= info.max) return false;
+      await requestServerReset(nim, token);
+      await clearEnrollment();
+      await AsyncStorage.setItem(RESET_COUNT_KEY, String(info.used + 1));
+      return true;
+    }
+  } catch {
+    // Server menolak atau tak terjangkau - pakai jatah lokal supaya reset
+    // tetap mungkin saat offline / akun sudah tidak aktif.
+  }
+
+  const count = await getLocalResetCount();
   if (count >= MAX_FACE_RESETS) return false;
   await clearEnrollment();
   await AsyncStorage.setItem(RESET_COUNT_KEY, String(count + 1));
   return true;
 }
 
-/** Wipes all local face-verification state, e.g. on logout/account switch. */
+/** Hapus seluruh state verifikasi wajah lokal, misalnya saat ganti akun. */
 export async function clearAllFaceData(): Promise<void> {
   await AsyncStorage.multiRemove([
     ENROLLMENT_KEY,
+    PENDING_PUSH_KEY,
     LEGACY_EMBEDDING_KEY,
     LEGACY_PHOTO_KEY,
     RESET_COUNT_KEY,

@@ -1,0 +1,4 @@
+numpy>=2.0
+pillow>=10.0
+ai-edge-litert>=2.1
+mediapipe>=0.10.30

@@ -27,8 +27,9 @@ import {
     PoorQualityFaceError,
 } from "../utils/faceAuthNative";
 import {
-    bestSimilarityToEnrollment,
+    similarityToEnrollment,
     isEnrolled,
+    syncEnrollmentFromServer,
 } from "../utils/faceEnrollment";
 import FaceEnrollmentModal from "./FaceEnrollmentModal";
 import { useFaceQualityGate } from "../hooks/useFaceQualityGate";
@@ -178,7 +179,14 @@ export default function LKHScreen() {
     loadUserProfile().then(() => {
       fetchServerLKH();
     });
-    isEnrolled().then(setHasEnrollment);
+    // Wajah terdaftar kini tinggal di server (lihat utils/faceEnrollment.ts).
+    // Selaraskan dulu supaya instalasi baru / perangkat baru langsung
+    // mengenali wajah yang sudah didaftarkan sebelumnya, baru baca hasilnya.
+    // syncEnrollmentFromServer() tidak pernah melempar - kalau server tidak
+    // terjangkau, cache lokal yang dipakai.
+    syncEnrollmentFromServer().finally(() => {
+      isEnrolled().then(setHasEnrollment);
+    });
     isDemoModeActive().then(setDemoModeActive);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -545,10 +553,12 @@ export default function LKHScreen() {
       }
 
       // Verifikasi max-of-N: bandingkan ke SEMUA embedding terdaftar dan
-      // ambil similarity tertinggi (lihat bestSimilarityToEnrollment).
-      const bestSimilarity = await bestSimilarityToEnrollment(embedding);
+      // ambil MEDIAN-nya, bukan yang tertinggi - lihat catatan panjang di
+      // similarityToEnrollment(): max-of-N memberi impostor N kesempatan
+      // menembus ambang, dan itulah sebab wajah orang lain bisa lolos.
+      const similarity = await similarityToEnrollment(embedding);
 
-      if (bestSimilarity === null) {
+      if (similarity === null) {
         // Set wajah hilang di tengah jalan (misal di-reset dari halaman
         // Profil) - jalur enroll-diam-diam sudah dihapus, jadi arahkan ke
         // modal pendaftaran resmi alih-alih menjadikan foto ini patokan.
@@ -557,12 +567,12 @@ export default function LKHScreen() {
         return;
       }
 
-      await logSimilaritySample(bestSimilarity, "unknown");
+      await logSimilaritySample(similarity, "unknown");
       // Presisi 2 desimal sengaja dipakai sementara (bukan dibulatkan ke
       // bilangan bulat) supaya angka kemiripan yang asli kelihatan buat
       // kalibrasi - "100%" yang dibulatkan bisa saja aslinya 99.4%.
-      const similarityLabel = (bestSimilarity * 100).toFixed(2);
-      if (bestSimilarity < FACE_MATCH_THRESHOLD) {
+      const similarityLabel = (similarity * 100).toFixed(2);
+      if (similarity < FACE_MATCH_THRESHOLD) {
         Alert.alert(
           "Wajah Tidak Cocok",
           `Wajah pada foto tidak cocok dengan wajah patokan absensi Anda (kemiripan ${similarityLabel}%). Absensi tidak disimpan.`,

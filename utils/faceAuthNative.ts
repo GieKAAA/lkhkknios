@@ -40,18 +40,29 @@ import { createImageFaceDetector, Face } from "react-native-vision-camera-face-d
  * Model: mobilefacenet.tflite, extracted from the official Android app's
  * APK (sirius-ai/MobileFaceNet_TF lineage - confirmed by reading the
  * flatbuffer's internal tensor/op names: "input" -> ... InvResBlock ... ->
- * "embeddings", no l2_normalize op, no quantize/dequantize op, no second
- * "phase_train" input). Practical consequences of that:
+ * "embeddings", no quantize/dequantize op, no second "phase_train" input).
+ * The file is byte-identical to the one inside the official Android APK
+ * (md5 7945c78f4484c99560df461df85baa2f) - so the model itself needs no
+ * porting at all; only the preprocessing around it does. Practical
+ * consequences of that:
  *  - Single input tensor [1,112,112,3] float32 RGB, single output
  *    [1,192] float32 - matches react-native-fast-tflite's
  *    `model.run([buffer])` / `runSync([buffer])` single-in/single-out shape.
- *  - The 192-d output is NOT L2-normalized by the model itself - this file
- *    normalizes it after inference (see l2Normalize below). MobileFaceNet
- *    is virtually always trained with an ArcFace/CosFace-style angular
- *    margin loss, i.e. cosine similarity between L2-normalized embeddings
- *    is the metric the model's embedding space was actually shaped for -
- *    unlike the OLD FaceRes model, cosine similarity is the right choice
- *    here, not a Euclidean-distance workaround.
+ *  - CORRECTION (measured, not inferred): this model DOES L2-normalize its
+ *    own output. Running it under a desktop TFLite interpreter gives
+ *    ||output|| = 1.0 for every input tried - zeros, constants, uniform
+ *    noise at several scales (see tools/face-calibration/). An earlier
+ *    version of this comment claimed the opposite from reading op names.
+ *    l2Normalize() below is therefore a no-op in practice; it is kept only
+ *    so a future model swap that ISN'T pre-normalized can't silently break
+ *    the comparison.
+ *  - Because the embeddings are unit vectors, cosine similarity and
+ *    Euclidean distance are two scales of the same quantity:
+ *        d^2 = 2 - 2*cos   <=>   cos = 1 - d^2/2
+ *    They rank pairs identically. So the official Android app's
+ *    distance-style threshold and this file's cosine-style threshold are
+ *    interconvertible - useful because the Android app's exact number is
+ *    not recoverable from its APK (its Dart code is AOT-compiled).
  *  - No baked-in normalization constants (no embedded TFLite metadata
  *    table), so pixel normalization is applied here explicitly using the
  *    standard convention for this model lineage: (pixel - 127.5) / 128,
@@ -67,9 +78,10 @@ import { createImageFaceDetector, Face } from "react-native-vision-camera-face-d
  *        shape used by the live quality gate)
  *     -> quality gate (single face, minimum size, small yaw/pitch, eyes
  *        open)
- *     -> crop a generous square around the face, rotate it level using the
- *        eye landmarks, crop again tightly, resize to 112x112
- *        (expo-image-manipulator)
+ *     -> warp the face onto the canonical 112x112 template using the eye
+ *        landmarks (expo-image-manipulator; see the ARC_* constants - this
+ *        is what the model was trained to receive, and getting it wrong
+ *        collapses the embedding space without raising any error)
  *     -> decode the resulting small JPEG to raw pixels (tfjs-react-native's
  *        decodeJpeg - see note below on why tfjs is still a dependency)
  *     -> normalize to float32 and run through mobilefacenet.tflite
@@ -109,12 +121,42 @@ const MODEL_INPUT_SIZE = 112;
 // is still fully covered after that expansion, even for a fairly tilted
 // head. cos(30deg)+sin(30deg) ~= 1.37, so 2.4x comfortably covers rotations
 // well beyond what a normal selfie would ever have.
-const INITIAL_CROP_RATIO = 2.4;
-// Final crop margin (relative to face box's longer side) after alignment -
-// same padding philosophy as the old pipeline's CROP_PADDING_RATIO: enough
-// context (forehead/chin/ears) without diluting the identity signal with
-// background/hair.
-const FINAL_CROP_RATIO = 1.3;
+/**
+ * CANONICAL ALIGNMENT TEMPLATE (ArcFace/InsightFace 112x112).
+ *
+ * This replaced ratio-of-the-bounding-box cropping, and it is the single
+ * most important correctness fix in this file. MobileFaceNet of this lineage
+ * is trained on faces warped onto a fixed 5-point template, NOT on "the
+ * detector's box, padded by some ratio". Feeding it box crops does not
+ * error - it quietly collapses the embedding space, which is exactly the
+ * reported bug (a different person passing attendance).
+ *
+ * Measured on a real photo set (19 owner photos + 5 other people,
+ * tools/face-calibration, 2026-08-27) - similarity between DIFFERENT people,
+ * which should be low:
+ *     box crop, ratio 1.3 (old):  mean 0.656, worst 0.748  <- unusable
+ *     box crop, ratio 2.0:        mean 0.528, worst 0.690
+ *     canonical alignment:        mean 0.338, worst 0.500
+ * and the owner's own photos rose from 0.763 to 0.805 mean at the same time.
+ * Across 400 randomised enrollment splits the worst genuine score (0.565)
+ * finally sits clear of the worst impostor score (0.374); with box cropping
+ * the two overlapped and NO threshold could separate them.
+ *
+ * Only the two eye landmarks are used. A similarity transform has 4 degrees
+ * of freedom (rotation, uniform scale, translation x/y) and two points pin
+ * down all four - so this is a complete alignment, not an approximation of
+ * the 5-point version. That matters practically: rotation + crop + resize is
+ * exactly what expo-image-manipulator can do, so no arbitrary affine warp
+ * (which it cannot do) is needed.
+ */
+const ARC_EYE_DISTANCE = 35.2372; // 73.5318 - 38.2946, on the 112px template
+// Where the midpoint between the eyes must land, as a fraction of the final
+// crop: ((38.2946+73.5318)/2, (51.6963+51.5014)/2) / 112.
+const ARC_EYE_CENTER_FX = 0.49926;
+const ARC_EYE_CENTER_FY = 0.46070;
+// The first crop only has to be loose enough that the final square is still
+// covered after rotation expands the canvas (cos30+sin30 ~= 1.37 < 1.5).
+const INITIAL_CROP_TO_FINAL = 1.5;
 
 // Quality gate thresholds - see qualityGate() below. Same calibration
 // caveat as FACE_MATCH_THRESHOLD: these are reasonable starting points,
@@ -308,45 +350,70 @@ function qualityGate(face: Face): void {
  * rotation direction is defined the other way around (counter-clockwise) -
  * see the comment that used to be in faceAuth.ts for that derivation.
  */
-function computeLevelingRotationDegrees(face: Face): number {
-  const landmarks = face.landmarks;
-  const leftEye = landmarks?.LEFT_EYE;
-  const rightEye = landmarks?.RIGHT_EYE;
-  if (!leftEye || !rightEye) return 0;
-
-  const [a, b] =
-    leftEye.x <= rightEye.x ? [leftEye, rightEye] : [rightEye, leftEye];
-  const radians = Math.atan2(b.y - a.y, b.x - a.x);
+function computeLevelingRotationDegrees(radians: number): number {
   return -(radians * (180 / Math.PI));
 }
 
+interface Point {
+  x: number;
+  y: number;
+}
+
+/** The two eye landmarks, ordered left-to-right in image coordinates. */
+function eyePair(face: Face): [Point, Point] | null {
+  const leftEye = face.landmarks?.LEFT_EYE;
+  const rightEye = face.landmarks?.RIGHT_EYE;
+  if (!leftEye || !rightEye) return null;
+  return leftEye.x <= rightEye.x ? [leftEye, rightEye] : [rightEye, leftEye];
+}
+
 /**
- * Crops a square around the face, rotates it level using the eye
- * landmarks, crops tightly again, and resizes to MODEL_INPUT_SIZE. Returns
- * the resulting file's URI. See the module doc comment for why this
- * happens on the still photo file rather than a live camera frame.
+ * Warps the face onto the canonical 112x112 template (see the ARC_* constants
+ * above) and returns the resulting file's URI. See the module doc comment for
+ * why this happens on the still photo file rather than a live camera frame.
+ *
+ * The target transform is a similarity transform - rotate the eye line level,
+ * scale so the eyes sit ARC_EYE_DISTANCE apart, translate so their midpoint
+ * lands on the template's eye midpoint. expo-image-manipulator has no affine
+ * warp, but it does not need one: rotate supplies the rotation, the crop
+ * origin supplies the translation, and resize supplies the scale. The only
+ * subtlety is that rotate() always pivots around the image's own centre, so
+ * the eye midpoint has to be tracked through that rotation rather than
+ * assumed to stay put (it does not, once a crop has been clamped against the
+ * photo edge).
  */
-async function cropAlignResize(photoUri: string, face: Face): Promise<string> {
+async function cropAlignResize(
+  photoUri: string,
+  face: Face,
+  eyes: [Point, Point],
+): Promise<string> {
+  const [leftEye, rightEye] = eyes;
   const photoWidth = face.frameWidth;
   const photoHeight = face.frameHeight;
-  const faceSize = Math.max(face.bounds.width, face.bounds.height);
-  const faceCenterX = face.bounds.x + face.bounds.width / 2;
-  const faceCenterY = face.bounds.y + face.bounds.height / 2;
 
-  // Step 1: generous square crop centered on the face, in original-photo
-  // pixel coordinates. Clamped to stay inside the photo.
+  const eyeDeltaX = rightEye.x - leftEye.x;
+  const eyeDeltaY = rightEye.y - leftEye.y;
+  const eyeDistance = Math.hypot(eyeDeltaX, eyeDeltaY);
+  const eyeCenterX = (leftEye.x + rightEye.x) / 2;
+  const eyeCenterY = (leftEye.y + rightEye.y) / 2;
+
+  // The crop that, once resized to 112px, puts the eyes exactly
+  // ARC_EYE_DISTANCE apart.
+  const finalSide = (eyeDistance * MODEL_INPUT_SIZE) / ARC_EYE_DISTANCE;
+
+  // Step 1: loose square around the eye midpoint, clamped inside the photo.
   const initialSide = Math.min(
-    faceSize * INITIAL_CROP_RATIO,
+    finalSide * INITIAL_CROP_TO_FINAL,
     photoWidth,
     photoHeight,
   );
   const initialOriginX = clamp(
-    faceCenterX - initialSide / 2,
+    eyeCenterX - initialSide / 2,
     0,
     photoWidth - initialSide,
   );
   const initialOriginY = clamp(
-    faceCenterY - initialSide / 2,
+    eyeCenterY - initialSide / 2,
     0,
     photoHeight - initialSide,
   );
@@ -366,36 +433,42 @@ async function cropAlignResize(photoUri: string, face: Face): Promise<string> {
     { compress: 1, format: ImageManipulator.SaveFormat.JPEG },
   );
 
-  // Step 2: rotate level. expo-image-manipulator's rotate() pivots around
-  // the image's own center and expands the canvas to fit - since step1 was
-  // centered on the face, the face stays centered (in the new, larger
-  // canvas) after this.
-  const rotationDegrees = computeLevelingRotationDegrees(face);
-  const step2 =
-    Math.abs(rotationDegrees) < 0.5
-      ? step1
-      : await ImageManipulator.manipulateAsync(
-          step1.uri,
-          [{ rotate: rotationDegrees }],
-          { compress: 1, format: ImageManipulator.SaveFormat.JPEG },
-        );
+  // Where the eye midpoint sits inside that crop.
+  let trackedEyeX = eyeCenterX - initialOriginX;
+  let trackedEyeY = eyeCenterY - initialOriginY;
 
-  // Step 3: final tight crop (centered on step2's own center, which is
-  // still the face center) + resize to the model's input size, in one call.
-  const finalSide = Math.min(
-    faceSize * FINAL_CROP_RATIO,
-    step2.width,
-    step2.height,
-  );
+  // Step 2: rotate the eye line level. The canvas grows, and the pivot is
+  // step1's centre - not the eye midpoint - so carry the midpoint through
+  // the same rotation to know where it ended up.
+  const radians = Math.atan2(eyeDeltaY, eyeDeltaX);
+  const rotationDegrees = computeLevelingRotationDegrees(radians);
+  let step2 = step1;
+  if (Math.abs(rotationDegrees) >= 0.5) {
+    step2 = await ImageManipulator.manipulateAsync(
+      step1.uri,
+      [{ rotate: rotationDegrees }],
+      { compress: 1, format: ImageManipulator.SaveFormat.JPEG },
+    );
+    const cos = Math.cos(radians);
+    const sin = Math.sin(radians);
+    const offsetX = trackedEyeX - step1.width / 2;
+    const offsetY = trackedEyeY - step1.height / 2;
+    trackedEyeX = step2.width / 2 + (offsetX * cos + offsetY * sin);
+    trackedEyeY = step2.height / 2 + (-offsetX * sin + offsetY * cos);
+  }
+
+  // Step 3: place the template's eye midpoint on the tracked one, then
+  // resize - the crop origin is the translation, the resize is the scale.
+  const croppedSide = Math.min(finalSide, step2.width, step2.height);
   const finalOriginX = clamp(
-    step2.width / 2 - finalSide / 2,
+    trackedEyeX - croppedSide * ARC_EYE_CENTER_FX,
     0,
-    step2.width - finalSide,
+    step2.width - croppedSide,
   );
   const finalOriginY = clamp(
-    step2.height / 2 - finalSide / 2,
+    trackedEyeY - croppedSide * ARC_EYE_CENTER_FY,
     0,
-    step2.height - finalSide,
+    step2.height - croppedSide,
   );
 
   const step3 = await ImageManipulator.manipulateAsync(
@@ -405,8 +478,8 @@ async function cropAlignResize(photoUri: string, face: Face): Promise<string> {
         crop: {
           originX: finalOriginX,
           originY: finalOriginY,
-          width: finalSide,
-          height: finalSide,
+          width: croppedSide,
+          height: croppedSide,
         },
       },
       { resize: { width: MODEL_INPUT_SIZE, height: MODEL_INPUT_SIZE } },
@@ -480,7 +553,19 @@ export async function getFaceEmbedding(photoUri: string): Promise<Float32Array> 
   const face = await detectSingleFace(photoUri);
   qualityGate(face);
 
-  const alignedUri = await cropAlignResize(photoUri, face);
+  // Without both eye landmarks the canonical alignment cannot be computed.
+  // Fail here rather than falling back to a plain box crop: an unaligned
+  // embedding is not comparable with an aligned one, so a silent fallback
+  // would poison the enrollment set or the comparison with a value that
+  // looks perfectly valid. See the ARC_* constants for what alignment buys.
+  const eyes = eyePair(face);
+  if (!eyes) {
+    throw new PoorQualityFaceError(
+      "Posisi mata tidak terbaca dari foto. Coba lagi menghadap kamera dengan mata terbuka dan pencahayaan lebih baik.",
+    );
+  }
+
+  const alignedUri = await cropAlignResize(photoUri, face, eyes);
   const inputBuffer = await fileToNormalizedInputBuffer(alignedUri);
 
   const model = await getModel();
@@ -519,20 +604,39 @@ export function faceSimilarity(a: Float32Array | number[], b: Float32Array | num
   return dot;
 }
 
-// CALIBRATION STATUS: starting guess, not a measured value. RAISED from 0.5
-// when verification switched to max-of-N (bestSimilarityToEnrollment in
-// faceEnrollment.ts): a probe is now compared against EVERY enrolled
-// embedding and only the highest score has to clear this threshold - that
-// gives an impostor up to N chances to beat it instead of one, which
-// inflates impostor scores well beyond what the single-reference 0.5 era
-// produced. 0.6 is a compensating guess for that effect, NOT a measurement.
+// CALIBRATION STATUS: measured (tools/face-calibration, 2026-08-27) on 19
+// owner photos across two sessions plus 5 other people. Over 400 randomised
+// enrollment splits (3-5 photos, both session directions), using canonical
+// alignment and median aggregation:
+//     worst genuine score  0.565
+//     worst impostor score 0.374
+//     0 of 400 splits had the two overlap
+// 0.47 is the midpoint of that worst-case gap, so the two error types carry
+// roughly equal headroom (~0.10 each).
 //
-// WAJIB DIKALIBRASI ULANG SETELAH MAX-OF-N AKTIF: every attendance attempt
-// logs its score via logSimilaritySample below (see LKHScreen.takeSelfie).
-// Collect fresh self/other clusters under the multi-enrollment regime, find
-// where the two distributions separate, and move this constant there. The
-// old 0.5-era calibration data no longer applies to this threshold.
-export const FACE_MATCH_THRESHOLD = 0.6;
+// This is much lower than the 0.6-0.62 that stood here before, and that is
+// expected rather than alarming: the old numbers were tuned on box-cropped
+// embeddings, where EVERY face scored high against every other. Canonical
+// alignment pushed impostor scores down (different people now average 0.34,
+// not 0.66), so the whole scale shifted. A threshold from the old pipeline
+// is meaningless against the new one.
+//
+// CAVEAT: five impostor identities is still few, and four of them contribute
+// a single photo each. The worst impostor score is the figure most likely to
+// be underestimated. Re-run the calibration as more faces become available.
+//
+// CARA MENGKALIBRASI ULANG (dua jalan, yang pertama tidak butuh build iOS):
+//  1. tools/face-calibration/calibrate.py - jalankan model yang sama di PC
+//     atas foto Anda sendiri + foto orang lain. Lihat README di folder itu.
+//  2. Di perangkat: tiap percobaan absen mencatat skornya lewat
+//     logSimilaritySample() (lihat LKHScreen.takeSelfie), dibaca dari
+//     halaman Profil.
+//
+// PENTING - JANGAN UBAH SENDIRIAN: nilai ini hanya berarti untuk pasangan
+// alignment kanonik (ARC_* di atas) + agregasi median (similarityToEnrollment
+// di faceEnrollment.ts). Mengubah salah satunya menggeser seluruh skala skor,
+// jadi ambang ini harus diukur ulang bersamaan.
+export const FACE_MATCH_THRESHOLD = 0.47;
 
 /**
  * Enrollment cross-check ONLY (enforced per-capture in
@@ -548,7 +652,14 @@ export const FACE_MATCH_THRESHOLD = 0.6;
  * not to enforce consistency. Do not reuse or unify with
  * FACE_MATCH_THRESHOLD - they answer different questions.
  */
-export const ENROLLMENT_CONSISTENCY_MIN = 0.35;
+// RAISED from 0.35 alongside the alignment fix. 0.35 was calibrated against
+// box-cropped embeddings; under canonical alignment two DIFFERENT people
+// average 0.34, so the old value sat right on the impostor mean and would
+// have waved a person swap straight through. Same-session captures of one
+// person score far higher (0.80 mean, 0.54 worst even across sessions), so
+// 0.45 still leaves plenty of room for the deliberate pose variation the
+// enrollment prompts ask for.
+export const ENROLLMENT_CONSISTENCY_MIN = 0.45;
 
 export const CALIBRATION_LOG_KEY = "@face_calibration_log";
 const MAX_CALIBRATION_LOG_ENTRIES = 200;
