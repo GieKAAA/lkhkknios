@@ -2,7 +2,7 @@ import { FontAwesome5, Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as FileSystem from "expo-file-system/legacy";
 import { BlurView } from "expo-blur";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
     Alert,
@@ -17,6 +17,7 @@ import {
 } from "react-native";
 import { CommonResolutions, useCameraDevice, useCameraPermission, usePhotoOutput } from "react-native-vision-camera";
 import { Camera as FaceDetectorCamera } from "react-native-vision-camera-face-detector";
+import type { Face } from "react-native-vision-camera-face-detector";
 import {
     FACE_DETECTOR_OPTIONS,
     FACE_MATCH_THRESHOLD,
@@ -33,6 +34,7 @@ import {
 } from "../utils/faceEnrollment";
 import FaceEnrollmentModal from "./FaceEnrollmentModal";
 import { useFaceQualityGate } from "../hooks/useFaceQualityGate";
+import { useLivenessChallenge } from "../hooks/useLivenessChallenge";
 import { scheduleDailyAttendanceReminders } from "../utils/notifications";
 import {
     checkAttendanceLocation,
@@ -167,6 +169,23 @@ export default function LKHScreen() {
     targetResolution: CommonResolutions.FHD_16_9,
   });
   const faceQualityGate = useFaceQualityGate();
+  // Deteksi keaktifan: shutter absen terkunci sampai pengguna menyelesaikan
+  // tantangan gerak (menoleh dua sisi), sehingga foto/layar statis tidak bisa
+  // lolos - lihat hooks/useLivenessChallenge.ts.
+  const liveness = useLivenessChallenge();
+  // Satu callback ke kamera yang menyuapi frame ke quality gate DAN ke
+  // liveness sekaligus. Keduanya membaca yaw/bounds yang sama; tidak ada
+  // mode detektor baru yang dinyalakan (aman dari crash SIGSEGV).
+  const handleCameraFaces = useCallback(
+    (faces: Face[]) => {
+      faceQualityGate.onFacesDetected(faces);
+      liveness.onFacesDetected(faces);
+    },
+    // Kedua callback sudah di-useCallback([]) di dalam hook-nya (stabil);
+    // merujuk membernya di sini aman, linter cuma tak bisa memverifikasinya.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [faceQualityGate.onFacesDetected, liveness.onFacesDetected],
+  );
   const insets = useSafeAreaInsets();
   const [isCameraVisible, setIsCameraVisible] = useState(false);
   // Enrollment terpisah (FaceEnrollmentModal) - terbuka saat user mencoba
@@ -489,6 +508,9 @@ export default function LKHScreen() {
       setIsCheckingLocation(false);
     }
 
+    // Setiap sesi absen memulai tantangan keaktifan dari nol - membuktikan
+    // wajah hidup yang hadir sekarang, bukan sekali seumur pemasangan.
+    liveness.reset();
     setIsCameraVisible(true);
   };
 
@@ -788,7 +810,9 @@ export default function LKHScreen() {
     return days;
   };
 
-  const captureDisabled = isProcessingFace;
+  // Shutter absen terkunci sampai tantangan keaktifan lolos (selain saat
+  // sedang memproses). Tanpa ini foto/layar statis bisa langsung dijepret.
+  const captureDisabled = isProcessingFace || !liveness.passed;
 
   return (
     <SafeAreaView style={styles.container}>
@@ -958,7 +982,7 @@ export default function LKHScreen() {
               device={cameraDevice}
               isActive={isCameraVisible}
               outputs={[photoOutput]}
-              onFacesDetected={faceQualityGate.onFacesDetected}
+              onFacesDetected={handleCameraFaces}
               onError={faceQualityGate.onFaceDetectionError}
               performanceMode="fast"
               // DIAGNOSTIK: dipaksa false (bukan pakai
@@ -1005,7 +1029,9 @@ export default function LKHScreen() {
             <View style={styles.cameraBottomArea}>
               <BlurView intensity={50} tint="dark" style={styles.liveStatusPill}>
                 <Text style={styles.liveStatusText}>
-                  {`${faceQualityGate.message} (akan diverifikasi setelah jepret)`}
+                  {liveness.passed
+                    ? `${faceQualityGate.message} (akan diverifikasi setelah jepret)`
+                    : `${liveness.instruction} (langkah ${liveness.step}/${liveness.total})`}
                 </Text>
               </BlurView>
 
